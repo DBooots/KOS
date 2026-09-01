@@ -129,7 +129,7 @@ namespace kOS.Safe.Compilation.IR
                     throw new NotImplementedException();
             }
 
-            foreach (BasicBlock returnBlock in pattern.Where(b => b.PostDominator == null || b.PostDominator is SyntheticReturnBlock))
+            foreach (BasicBlock returnBlock in pattern.Where(b => b.Continuation is JumpContinuation jumpContinuation && jumpContinuation.Target is SyntheticReturnBlock))
                 ((JumpContinuation)returnBlock.Continuation).Target = after;
 
             before.CodeComponent.Blocks.AddRange(pattern.Where(b => !before.CodeComponent.Blocks.Contains(b)));
@@ -147,7 +147,7 @@ namespace kOS.Safe.Compilation.IR
             {
                 if (replacementScopes.ContainsKey(block.Scope))
                     continue;
-                if (replacementBlocks.ContainsKey(block.Scope.HeaderBlock))
+                if (!block.Scope.IsGlobalScope && replacementBlocks.ContainsKey(block.Scope.HeaderBlock))
                     replacementScopes[block.Scope] = CloneScope(block.Scope, replacementBlocks, replacementScopes);
             }
             Dictionary<IRInstruction, IRInstruction> replacementInstructions = new Dictionary<IRInstruction, IRInstruction>();
@@ -175,7 +175,8 @@ namespace kOS.Safe.Compilation.IR
         }
         private static IRScope CloneScope(IRScope original, Dictionary<BasicBlock, BasicBlock> replacementBlocks, Dictionary<IRScope, IRScope> replacementScopes)
         {
-            if (replacementBlocks.ContainsKey(original.ParentScope.HeaderBlock))
+            if (!replacementScopes.ContainsKey(original.ParentScope) &&
+                replacementBlocks.ContainsKey(original.ParentScope.HeaderBlock))
                 replacementScopes[original.ParentScope] = CloneScope(original.ParentScope, replacementBlocks, replacementScopes);
 
             IRScope scope;
@@ -230,7 +231,6 @@ namespace kOS.Safe.Compilation.IR
                     break;
                 default:
                     throw new NotImplementedException();
-
             }
 
             block.IsExecutable = original.IsExecutable;
@@ -251,6 +251,10 @@ namespace kOS.Safe.Compilation.IR
                 block.Scope = newScope;
             else
                 block.Scope = original.Scope;
+
+#if DEBUG
+            block.OriginalOpcodes = original.OriginalOpcodes;
+#endif
         }
     }
 }

@@ -99,26 +99,32 @@ namespace kOS.Safe.Compilation.IR
             
             MainCode = IRBuilder.Lower(codePart.MainCode, this);
 
-            Functions = new List<IRFunction>();
-            Queue<UserFunction> functionsToLower = new Queue<UserFunction>(userFunctions.Where(f => closureScopes.ContainsKey(f.Identifier)));
-            HashSet<UserFunction> completedFunctions = new HashSet<UserFunction>();
-            while (functionsToLower.Count > 0)
-            {
-                UserFunction function = functionsToLower.Dequeue();
-                Functions.Add(new IRFunction(function, this));
-                completedFunctions.Add(function);
-                foreach (UserFunction func in userFunctions.Where(
-                    f => closureScopes.ContainsKey(f.Identifier) &&
-                    !completedFunctions.Contains(f) &&
-                    !functionsToLower.Contains(f)))
-                    functionsToLower.Enqueue(func);
-            }
-            Triggers = triggers.Select(t => new IRTrigger(t, this)).ToList();
-            foreach (UserFunction func in userFunctions.Except(completedFunctions))
-                Functions.Add(new IRFunction(func, this));
-
             if (MainCode.Count > 0)
                 RootBlock = MainCode[0];
+            Functions = new List<IRFunction>();
+            Queue<UserFunction> functionsToLower = new Queue<UserFunction>(userFunctions);
+            Triggers = new List<IRTrigger>();
+            Queue<Trigger> triggersToLower = new Queue<Trigger>(triggers);
+            while (functionsToLower.Count > 0 ||
+                triggersToLower.Count > 0)
+            {
+                if (functionsToLower.Where(f => closureScopes.ContainsKey(f.Identifier)).Any())
+                {
+                    UserFunction function = functionsToLower.Dequeue();
+                    if (!closureScopes.ContainsKey(function.Identifier))
+                        functionsToLower.Enqueue(function);
+                    else
+                        Functions.Add(new IRFunction(function, this));
+                }
+                else
+                {
+                    Trigger trigger = triggersToLower.Dequeue();
+                    if (!closureScopes.ContainsKey(trigger.Code.FirstOrDefault()?.Label ?? ""))
+                        triggersToLower.Enqueue(trigger);
+                    else
+                        Triggers.Add(new IRTrigger(trigger, this));
+                }
+            }
         }
 
         /// <summary>
@@ -248,6 +254,8 @@ namespace kOS.Safe.Compilation.IR
         }
         public IRFunction GetFunction(IRCall call)
         {
+            if (call is IRRun)
+                return null;
             if (!functionRefs.TryGetValue(call.Function, out string functionName))
                 return null;
             if (functionName == null)
@@ -379,7 +387,7 @@ namespace kOS.Safe.Compilation.IR
             /// <summary>
             /// Gets the return value of this function.
             /// </summary>
-            public PhiOperand<IRReturn> Returns { get; } = new PhiOperand<IRReturn>();
+            public PhiOperand Returns { get; } = new PhiOperand();
             /// <summary>
             /// Gets a value indicating whether this instance is invariant.
             /// A user function must also be inert to be considered invariant.
@@ -415,6 +423,7 @@ namespace kOS.Safe.Compilation.IR
                             {
                                 foreach (IRInstruction operation in instruction.DepthFirstInstructions())
                                     if (operation is IActionInstruction actionInstruction &&
+                                        !(actionInstruction is IRCall call && CodePart.GetFunction(call)==this) &&
                                         !actionInstruction.IsInert)
                                         return false;
                                 return true;

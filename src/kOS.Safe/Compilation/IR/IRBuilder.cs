@@ -121,7 +121,12 @@ namespace kOS.Safe.Compilation.IR
         }
 
         private static BasicBlock GetBlockFromStartIndex(List<BasicBlock> blocks, int startIndex)
-            => blocks.First(b => b.StartIndex == startIndex);
+        {
+            BasicBlock target = blocks.FirstOrDefault(b => b.StartIndex == startIndex);
+            if (target == null)
+                target = blocks.First(b => b.CodeComponent != null).CodeComponent.TerminalBlock;
+            return target;
+        }
 
         private static void AssignScopes(BasicBlock root, IRScope globalScope, HashSet<int> scopePushIndices, Dictionary<int, int> scopePopIndices)
         {
@@ -175,6 +180,16 @@ namespace kOS.Safe.Compilation.IR
                 if (i > currentBlock.EndIndex)
                 {
                     SetStackState(stack, currentBlock);
+                    if (code[i - 1] is OpcodeReturn)
+                    {
+                        currentBlock.Continuation = new JumpContinuation(currentBlock.CodeComponent.TerminalBlock, currentBlock.Continuation.SourceLine, currentBlock.Continuation.SourceColumn);
+                        foreach (BasicBlock successor in currentBlock.Dominates.ToArray())
+                        {
+                            if (successor is SyntheticReturnBlock)
+                                continue;
+                            successor.Dominator = null;
+                        }
+                    }
                     currentBlock = GetBlockFromStartIndex(blocks, i);
                 }
                 ParseInstruction(code[i], currentBlock, stack, labels, i, blocks, ref functionsToEnroll, ref closuresToEnroll);
@@ -183,7 +198,10 @@ namespace kOS.Safe.Compilation.IR
 
         private static void SetStackState(Stack<IInterimOperand> stack, BasicBlock block)
         {
-            List<IRInstruction> instructions = block.Instructions;
+            if (stack.Count == 0)
+                return;
+
+            List<IRInstruction> instructions = new List<IRInstruction>();
 
             while (stack.Count > 0)
             {
@@ -196,6 +214,7 @@ namespace kOS.Safe.Compilation.IR
                     push = new IRPushStack(block, stackValue);
                 instructions.Add(push);
             }
+            block.Instructions.AddRange(instructions.Reverse<IRInstruction>());
         }
 
         private static IInterimOperand PopFromStack(Stack<IInterimOperand> stack, BasicBlock block)
@@ -270,6 +289,7 @@ namespace kOS.Safe.Compilation.IR
                     currentBlock.Add(new IRNoStackInstruction(currentBlock, opcode, true));
                     break;
                 case OpcodeTestArgBottom _:
+                case OpcodeTestCancelled _:
                     instruction = new IRNonVarPush(currentBlock, opcode);
                     stack.Push(instruction);
                     break;
@@ -324,14 +344,26 @@ namespace kOS.Safe.Compilation.IR
                     break;
                 case OpcodeCall call:
                     Stack<IInterimOperand> arguments = new Stack<IInterimOperand>();
+                    bool argumentsClosed = false;
                     while (stack.Count > 0)
                     {
                         IInterimOperand stackResult = PopStack();
                         if (stackResult is InterimConstantValue constant && constant.Value is Execution.KOSArgMarkerType)
+                        {
+                            argumentsClosed = true;
                             break;
+                        }
                         arguments.Push(stackResult);
                     }
-                    instruction = new IRCall(currentBlock, call, arguments);
+                    if (call.Destination == null &&
+                        call.DestinationLabel.StartsWith("@LR"))
+                    {
+                        if (!(PopStack() is InterimConstantValue constant && constant.Value is Execution.KOSArgMarkerType))
+                            throw new Exceptions.KOSYouShouldNeverSeeThisException("A call to the loader/runner did not have two ArgMarkers.");
+                        instruction = new IRRun(currentBlock, call, arguments);
+                    }
+                    else
+                        instruction = new IRCall(currentBlock, call, argumentsClosed, arguments);
                     if (stack.Count > 0 && !((IRCall)instruction).Direct)
                     {
                         ((IRCall)instruction).IndirectMethod = PopStack();
@@ -376,6 +408,9 @@ namespace kOS.Safe.Compilation.IR
                     IInterimOperand second = stack.Pop();
                     stack.Push(first);
                     stack.Push(second);
+                    break;
+                case OpcodeEval eval:
+                    stack.Push(new IREval(currentBlock, eval, PopStack()));
                     break;
                 default:
                     throw new NotImplementedException($"The Opcode of type {opcode.GetType()} is not implemented.");

@@ -127,7 +127,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                         continue;
 
                     // Process Phis first, as if they are instructions.
-                    foreach (PhiNode phi in block.Phis.Values)
+                    foreach (PhiNodeSSA phi in block.Phis.Values)
                     {
                         foreach (SSADefinition variable in phi.PossibleValues.Values)
                             GetOrCreate(variableUses, variable).Add(phi);
@@ -221,7 +221,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                         if (instruction is IRAssign assignment)
                             foreach (IOperandInstructionBase use in GetOrCreate(variableUses, assignment.Target))
                                 instructionQueue.Enqueue(use);
-                        else if (instruction is PhiNode phi)
+                        else if (instruction is PhiNodeSSA phi)
                             foreach (IOperandInstructionBase use in GetOrCreate(variableUses, phi.Result))
                                 instructionQueue.Enqueue(use);
                         else if (instruction is IStackTransferObject stackTransfer)
@@ -270,7 +270,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     return true;
                 }
             }
-            else if (instruction is PhiNode phi)
+            else if (instruction is PhiNodeSSA phi)
             {
                 if (typeAndInvarianceCache.TryGetValue(phi.Result, out (Type storedType, bool storedInvariance) cached))
                 {
@@ -386,7 +386,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 {
                     foreach (IOperandInstructionBase operandInstruction in instruction.DepthFirst())
                     {
-                        if (operandInstruction is PhiNode)
+                        if (operandInstruction is PhiNodeSSA)
                             continue;
                         if (operandInstruction is IRUnaryOp unaryOp &&
                             unaryOp.Operation is OpcodeExists)
@@ -448,7 +448,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             foreach (PhiVariable phi in definition.ReplacedBy.Where(ssaDef => ssaDef is PhiVariable).Cast<PhiVariable>())
             {
                 // Ignore restrictions on phis if this definition's block is not executable.
-                if (!phi.Node.PossibleValues.First(kvp => kvp.Value == definition).Key.IsExecutable)
+                if (!phi.Node.PossibleValues.Keys.Any(b => b.IsExecutable))
                     continue;
                 // If the phi variable is protected, its incoming definitions must be too.
                 if (DefinitionIsProtected(phi, usedVariables))

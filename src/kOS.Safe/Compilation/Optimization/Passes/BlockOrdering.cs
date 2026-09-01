@@ -86,7 +86,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             {
                 (BasicBlock sequenceRoot, BasicBlock sequenceExit) = sequenceStarts.Dequeue();
                 regionExits.Push(sequenceExit);
-                MetaBlockSequence sequence = ConstructMetaSequence(sequenceRoot, regionExits, out Queue<(BasicBlock, BasicBlock)> newStarts);
+                MetaBlockSequence sequence = ConstructMetaSequence(sequenceRoot, regionExits, out Queue<(BasicBlock, BasicBlock)> newStarts, null);
                 regionExits.Pop();
                 foreach ((BasicBlock, BasicBlock) start in newStarts)
                     sequenceStarts.Enqueue(start);
@@ -146,10 +146,14 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             return results;
         }
 
-        private static MetaBlockSequence ConstructMetaSequence(BasicBlock root, Stack<BasicBlock> regionExits, out Queue<(BasicBlock Root, BasicBlock Exit)> newOffshoots)
+        private static MetaBlockSequence ConstructMetaSequence(BasicBlock root, Stack<BasicBlock> regionExits, out Queue<(BasicBlock Root, BasicBlock Exit)> newOffshoots, LoopData? loop)
         {
             // Create a new sequence with just the root block.
-            MetaBlockSequence sequence = new MetaBlockSequence(root);
+            MetaBlockSequence sequence;
+            if (loop != null && loop.Value.body == root)
+                sequence = new MetaBlockSequence((BasicBlock)null);
+            else
+                sequence = new MetaBlockSequence(root);
             BasicBlock block = root;
             newOffshoots = new Queue<(BasicBlock, BasicBlock)>();
             // If the block is the next region exit (or null),
@@ -157,21 +161,21 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             // Note that region exits are part of the enclosing region's sequence.
             while (block != null && (
                 block != regionExits.Peek() ||
-                (regionExits.Count == 1 && block != root.CodeComponent.TerminalBlock)))
+                (regionExits.Count == 1 && root == root.CodeComponent.RootBlock && block != root.CodeComponent.TerminalBlock)))
             {
                 // Identify loops first because loop branches are subsets of branches.
                 // If root == loopData.body it's because this was just called recursively
                 // below. This can be treated as not a loop since it is already identified
                 // as a loop body.
-                if (IdentifyLoop(block, regionExits.Peek(), out LoopData loopData) && root != loopData.body)
+                if (IdentifyLoop(block, regionExits.Peek(), out LoopData loopData) && !loopData.Equals(loop))
                 {
                     // Add the header to the current sequence, if necessary.
-                    if (loopData.body != block)
+                    if (loopData.body != root)
                         sequence.Add(block);
                     // Push the next region exit.
                     regionExits.Push(loopData.exit);
                     // Add the sequence from the loop's body.
-                    sequence.Add(ConstructMetaSequence(loopData.body, regionExits, out Queue<(BasicBlock, BasicBlock)> childOffshoots));
+                    sequence.Add(ConstructMetaSequence(loopData.body, regionExits, out Queue<(BasicBlock, BasicBlock)> childOffshoots, loopData));
                     // That region is now popped.
                     regionExits.Pop();
                     // Enqueue any new offshoots.
@@ -192,15 +196,15 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     // Add the 'if/then' block to the sequence.
                     // The branch instruction will skip ahead to the exit, so this ordering
                     // allows the 'if/then' block to fall through to the exit.
-                    regionExits.Push(branchData.exit ?? regionExits.Peek());
-                    sequence.Add(ConstructMetaSequence(branchData.ifBlock, regionExits, out Queue<(BasicBlock, BasicBlock)> childOffshoots));
+                    regionExits.Push(branchData.exit);
+                    sequence.Add(ConstructMetaSequence(branchData.ifBlock, regionExits, out Queue<(BasicBlock, BasicBlock)> childOffshoots, null));
                     regionExits.Pop();
                     // Enqueue any new offshoots.
                     foreach ((BasicBlock, BasicBlock) child in childOffshoots)
                         newOffshoots.Enqueue(child);
                     // If the exit block is null, that's probably because the
                     // 'else' block was categorized as the exit.
-                    if (branchData.exit == null && branchData.elseBlock != null)
+                    if (branchData.exit == regionExits.Peek() && branchData.elseBlock != null)
                     {
                         // Set the 'exit' block as the next block for this sequence.
                         block = branchData.elseBlock;
@@ -219,6 +223,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     if (block != root)
                         sequence.Add(block);
                     // This condition occurs only in branches/loops, or with a single successor.
+                    // This condition breaks in an edge case...
                     if (block.PostDominator?.Dominator == block)
                     {
                         // Set that successor as the next block for this sequence.
@@ -254,7 +259,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                         // Sanity check: the exit should not be dominated by 'block'
                         // (it must be reachable without going through the loop body).
                         // Also verify exit is not inside the loop.
-                        if (IsBackEdge(exit, bodyEntry))
+                        if (IsBackEdge(exit, bodyEntry) && bodyEntry != block)
                             continue; // both successors loop back — degenerate, skip
 
                         loopData = new LoopData(
@@ -282,7 +287,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 {
                     // One successor of the latch loops back; the other is the exit.
                     BasicBlock exit = latch.Successors.FirstOrDefault(s => s != block);
-                    if (exit != null && (exit == regionExit || IsInsideRegion(exit, regionExit)))
+                    if (exit != null && (exit == regionExit || IsInsideRegion(exit, block, regionExit)))
                     {
                         // Do-while: no header (body is entered unconditionally),
                         // branch is at the latch, body starts at 'block'.
@@ -299,7 +304,6 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     // -- Case 3: infinite loop ---
                     // The block is entered unconditionally (no branch at the header).
                     // There is no branch, but there is a back edge to the entry block.
-
                     loopData = new LoopData(
                         header: null,
                         branchBlock: null,
@@ -350,7 +354,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 BasicBlock candidate = stack.Pop();
 
                 // Don't cross out of the region.
-                if (!IsInsideRegion(candidate, regionExit))
+                if (!IsInsideRegion(candidate, bodyEntry, regionExit))
                     continue;
 
                 if (candidate.Successors.Contains(bodyEntry))
@@ -417,7 +421,6 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             {
                 ifBlock = elseBlock;
                 elseBlock = null;
-                branch.PreferFalse = !branch.PreferFalse;
             }
             branchData = new BranchData(branchingBlock, ifBlock, elseBlock, rejoinsAt);
             return true;
@@ -425,29 +428,80 @@ namespace kOS.Safe.Compilation.Optimization.Passes
         private static BasicBlock GetSequenceEnd(BasicBlock block)
         {
             while (block.PostDominator?.Dominator == block)
-                block = block.PostDominator;
+                    block = block.PostDominator;
             return block;
         }
         private static BasicBlock FindLocalMerge(BasicBlock ifBlock, BasicBlock regionExit)
         {
+            // Fast method: walk the post-dominator chain.
+            // This fails when a branch (or a nested branch) exits the region early.
             BasicBlock candidate = ifBlock.PostDominator;
-            while (candidate == regionExit || !IsInsideRegion(candidate, regionExit))
+            while (candidate != null && candidate != regionExit)
+            {
+                if (IsInsideRegion(candidate, ifBlock, regionExit))
+                    return candidate;
                 candidate = candidate.PostDominator;
-            // If we've walked all the way out, there is no local merge
-            return candidate == regionExit ? null : candidate;
+            }
+
+            // Slow method: find the first block reachable by both branches.
+            BranchContinuation branch = (BranchContinuation)ifBlock.Continuation;
+
+            HashSet<BasicBlock> trueReach = ReachableInRegion(branch.True, ifBlock, regionExit);
+            HashSet<BasicBlock> falseReach = ReachableInRegion(branch.False, ifBlock, regionExit);
+            HashSet<BasicBlock> candidates = new HashSet<BasicBlock>(trueReach);
+            candidates.IntersectWith(falseReach);
+
+            foreach (BasicBlock c in candidates)
+            {
+                HashSet<BasicBlock> reachableFromCandidate = ReachableInRegion(c, ifBlock, regionExit);
+                if (!candidates.Any(other => other != c && !reachableFromCandidate.Contains(other)))
+                    return c;
+            }
+
+            // No intersection means that one or both blocks purely exit the region.
+            // If one block can reach the regionExit, we'll consider
+            // that to be the 'end' of the if block.
+            if (trueReach.Contains(regionExit))
+                return branch.True;
+            if (falseReach.Contains(regionExit))
+                return branch.False;
+
+            // Both branches solely exit the region.
+            return regionExit;
         }
-        public static bool IsInsideRegion(BasicBlock candidate, BasicBlock regionExit)
+        public static bool IsInsideRegion(BasicBlock candidate, BasicBlock regionEntry, BasicBlock regionExit)
         {
-            // Walk the post-dominator chain of regionExit upward.
-            // If we encounter candidate, it is outside or on the boundary.
-            BasicBlock block = regionExit;
+            BasicBlock block = candidate;
             while (block != null)
             {
-                if (block == candidate)
+                if (block == regionExit)
                     return false;
-                block = block.PostDominator;
+                if (block == regionEntry)
+                    return true;
+                block = block.Dominator;
             }
-            return true;
+            return false;
+        }
+
+        private static HashSet<BasicBlock> ReachableInRegion(BasicBlock start, BasicBlock regionEntry, BasicBlock regionExit)
+        {
+            HashSet<BasicBlock> result = new HashSet<BasicBlock>();
+            Queue<BasicBlock> queue = new Queue<BasicBlock>();
+            if (IsInsideRegion(start, regionEntry, regionExit))
+                queue.Enqueue(start);
+
+            while (queue.Count > 0)
+            {
+                BasicBlock block = queue.Dequeue();
+                if (!result.Add(block))
+                    continue;
+                foreach (BasicBlock successor in block.Successors)
+                {
+                    if (IsInsideRegion(successor, regionEntry, regionExit))
+                        queue.Enqueue(successor);
+                }
+            }
+            return result;
         }
 
         public readonly struct BranchData
@@ -518,19 +572,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             }
 
             public bool BodyContains(BasicBlock block)
-            {
-                BasicBlock current = block;
-                while (current.PostDominator != null && current.PostDominator != exit)
-                    current = current.PostDominator;
-                if (current.PostDominator != exit)
-                    return false;
-                current = block;
-                while (current.Dominator != null && current != body)
-                    current = current.Dominator;
-                if (current != body)
-                    return false;
-                return true;
-            }
+                => IsInsideRegion(block, body, exit);
             public IEnumerable<BasicBlock> GetBody()
             {
                 HashSet<BasicBlock> blocks = new HashSet<BasicBlock>();
@@ -539,20 +581,26 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 while (queue.Count > 0)
                 {
                     BasicBlock current = queue.Dequeue();
-                    if (blocks.Add(current) && BodyContains(current))
+                    if (BodyContains(current) && blocks.Add(current))
                     {
                         yield return current;
                         foreach (BasicBlock successor in current.Successors)
-                            queue.Enqueue(successor);
+                                queue.Enqueue(successor);
                     }
                 }
             }
+            public bool Equals(LoopData other)
+                => body == other.body &&
+                branchBlock == other.branchBlock &&
+                exit == other.exit &&
+                header == other.header;
         }
 
         public abstract class BlockSequence
         {
+            protected BasicBlock first;
             public abstract IReadOnlyList<BasicBlock> Blocks { get; }
-            public BasicBlock First { get; }
+            public BasicBlock First => first ?? Blocks.FirstOrDefault();
             public BasicBlock Last { get; protected set; }
             public IReadOnlyCollection<BasicBlock> Predecessors => First.Predecessors;
             public IReadOnlyCollection<BasicBlock> Successors => Last.Successors;
@@ -561,7 +609,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             public abstract void Add(BasicBlock block);
             protected BlockSequence(BasicBlock first)
             {
-                First = first;
+                this.first = first;
             }
             public static explicit operator BlockSequence(BasicBlock block)
                 => new BasicBlockSequence(block);
@@ -578,7 +626,10 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             }
             public BasicBlockSequence(BasicBlock block) : base(block)
             {
-                blocks = new List<BasicBlock>() { block };
+                if (block == null)
+                    blocks = new List<BasicBlock>();
+                else
+                    blocks = new List<BasicBlock>() { block };
                 Last = block;
             }
             public override void Add(BasicBlock block)

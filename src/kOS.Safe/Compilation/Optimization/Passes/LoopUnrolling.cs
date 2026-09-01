@@ -51,8 +51,10 @@ namespace kOS.Safe.Compilation.Optimization.Passes
 
         private static bool IsLoopConstantLength(BlockOrdering.LoopData data, out Dictionary<string, List<Encapsulation.Structure>> indices)
         {
-            IInterimOperand condition = (data.branchBlock.Continuation as BranchContinuation).Condition;
             indices = null;
+            IInterimOperand condition = (data.branchBlock?.Continuation as BranchContinuation)?.Condition;
+            if (condition == null)
+                return false;
             int bodySize = BasicBlock.GetOpcodeCount(data.GetBody());
             int maxUnrollIterations;
             if (bodySize == 0)

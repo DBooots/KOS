@@ -75,7 +75,11 @@ namespace kOS.Safe.Compilation.IR
         public static Type GetTypeForSuffix(Type structureType, string suffix)
         {
             if (!typeof(ISuffixed).IsAssignableFrom(structureType))
+            {
+                if (structureType == null)
+                    return typeof(Structure);
                 throw new InvalidOperationException($"Tried to get suffixes on a non-suffixed type {structureType}.");
+            }
 
             if (suffixDictionaries.ContainsKey(structureType))
             {

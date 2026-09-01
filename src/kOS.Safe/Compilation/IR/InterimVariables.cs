@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using kOS.Safe.Compilation.Optimization;
 
 namespace kOS.Safe.Compilation.IR
 {
@@ -135,7 +136,7 @@ namespace kOS.Safe.Compilation.IR
             {
                 Type proposedType = References.First().Type;
                 foreach (SSADefinition variable in References.Skip(1))
-                    proposedType = PhiNode.GetFirstCommonBaseType(proposedType, variable.Type);
+                    proposedType = PhiNodeSSA.GetFirstCommonBaseType(proposedType, variable.Type);
 
                 return proposedType;
             }
@@ -285,9 +286,9 @@ namespace kOS.Safe.Compilation.IR
                         throw new InvalidCastException();
                     return potentialDefinition.Preceding.GetSetDefinition();
                 case PhiVariable phi:
-                    if (phi.Node.PossibleValues.Where(kvp => kvp.Key.IsExecutable).Select(kvp => kvp.Value).Distinct().Count() > 1)
+                    if (phi.Node.PossibleValues.Where(kvp => kvp.Key.IsExecutable).Select(kvp => kvp.Value).Distinct(ReferenceEqualityComparer).Count() > 1)
                         throw new InvalidCastException();
-                    return phi.Node.PossibleValues.FirstOrDefault(kvp => kvp.Key.IsExecutable).Value.GetSetDefinition();
+                    return phi.Node.PossibleValues.FirstOrDefault(kvp => kvp.Key.IsExecutable).Value?.GetSetDefinition();
                 default:
                     throw new NotImplementedException();
             }
@@ -414,7 +415,7 @@ namespace kOS.Safe.Compilation.IR
         public SSADefinition Succeeding { get; private set; }
         public IRUnset Conditional { get; }
         public override Type Type => State == SetState.Set ?
-            PhiNode<SSADefinition>.GetFirstCommonBaseType(Preceding.Type, Succeeding.Type) : null;
+            PhiNodeSSA.GetFirstCommonBaseType(Preceding.Type, Succeeding.Type) : null;
         public override bool IsInvariant => (Conditional?.IsInvariant ?? false) &&
             !Conditional.IsExecutable && Preceding.IsInvariant;
 
@@ -533,17 +534,18 @@ namespace kOS.Safe.Compilation.IR
     {
         private readonly SetState internalSetState = SetState.Set;
 
-        public PhiNode<SSADefinition> Node { get; }
+        public PhiNodeSSA Node { get; }
         public override SetState State
         {
             get
             {
-                IEnumerable<SSADefinition> possibleValues = Node.PossibleValues.Values;
-                if (possibleValues.Any(v => v.State < SetState.Set))
+                HashSet<SSADefinition> visited = new HashSet<SSADefinition>(ReferenceEqualityComparer);
+                if (AnyNotSet(this, visited, true))
                 {
-                    if (possibleValues.All(v => v.State == SetState.Unset))
+                    visited.Clear();
+                    if (AllUnset(this, visited, true))
                         return SetState.Unset;
-                    else
+                    else if (internalSetState > SetState.Unset)
                         return SetState.PotentiallyUnset;
                 }
                 return internalSetState;
@@ -552,7 +554,7 @@ namespace kOS.Safe.Compilation.IR
         public override bool IsInvariant => Node.IsInvariant;
         public override Type Type => Node.Type;
 
-        public PhiVariable(string name, PhiNode<SSADefinition> node) : base(name)
+        public PhiVariable(string name, PhiNodeSSA node) : base(name)
         {
             Node = node;
         }
@@ -576,6 +578,44 @@ namespace kOS.Safe.Compilation.IR
                 ReplacedBy.Add(result);
             }
             return result;
+        }
+
+        private bool AnyNotSet(SSADefinition ssaDef, HashSet<SSADefinition> visited, bool ignoreInternalState = false)
+        {
+            switch (ssaDef)
+            {
+                case SSASetDefinition _:
+                case SSAPotentialDefinition _:
+                    return ssaDef.State != SetState.Set;
+                case PhiVariable phi:
+                    if (!visited.Add(phi))
+                        return false;
+                    foreach (SSADefinition def in phi.Node.PossibleValues.Values)
+                        if (AnyNotSet(def, visited))
+                            return true;
+                    return !(ignoreInternalState || phi.internalSetState == SetState.Set);
+                default:
+                    throw new NotImplementedException();
+            }
+        }
+
+        private bool AllUnset(SSADefinition ssaDef, HashSet<SSADefinition> visited, bool ignoreInternalState = false)
+        {
+            switch (ssaDef)
+            {
+                case SSASetDefinition _:
+                case SSAPotentialDefinition _:
+                    return ssaDef.State == SetState.Unset;
+                case PhiVariable phi:
+                    if (!visited.Add(phi))
+                        return true;
+                    foreach (SSADefinition def in phi.Node.PossibleValues.Values)
+                        if (!AllUnset(def, visited))
+                            return false;
+                    return ignoreInternalState || phi.internalSetState == SetState.Unset;
+                default:
+                    throw new NotImplementedException();
+            }
         }
 
         public override InterimConstantValue Evaluate()
@@ -608,17 +648,45 @@ namespace kOS.Safe.Compilation.IR
             => $"{Name} #{ssaIndex}";
     }
 
-    public class PhiNode : PhiNode<SSADefinition>
+    public class PhiNodeSSA : PhiNode<SSADefinition>
     {
+        protected override IEnumerable<SSADefinition> GetObjects()
+        {
+            HashSet<SSADefinition> objects = new HashSet<SSADefinition>(SSADefinition.ReferenceEqualityComparer);
+            foreach (SSADefinition definition in base.GetObjects())
+                CollectDefinitions(definition, objects);
+            objects.RemoveWhere(obj => obj is PhiVariable);
+            return objects;
+        }
+
+        private void CollectDefinitions(SSADefinition definition, HashSet<SSADefinition> collection)
+        {
+            switch (definition)
+            {
+                case SSASetDefinition _:
+                case SSAPotentialDefinition _:
+                    collection.Add(definition);
+                    break;
+                case PhiVariable phi:
+                    if (collection.Add(phi))
+                    {
+                        foreach (SSADefinition def in phi.Node.PossibleValues.Where(kvp => kvp.Key.IsExecutable).Select(kvp => kvp.Value))
+                            CollectDefinitions(def, collection);
+                    }
+                    break;
+            }
+        }
+
         protected override bool ObjIsInvariant(SSADefinition obj)
             => obj.IsInvariant;
         protected override Type ObjType(SSADefinition obj)
             => obj.Type;
         public PhiVariable Result { get; }
 
-        public PhiNode(string name)
+        public PhiNodeSSA(string name)
         {
             Result = new PhiVariable(name, this);
+            objComparer = SSADefinition.ReferenceEqualityComparer;
         }
 
         protected override InterimConstantValue EvaluateObj(SSADefinition obj)
@@ -638,12 +706,52 @@ namespace kOS.Safe.Compilation.IR
         }
 
     }
-    public class PhiOperand<T> : PhiNode<T> where T : IRInstruction, ISingleOperandInstruction
+    public class PhiOperand : PhiNode<IRReturn>
     {
-        protected override bool ObjIsInvariant(T obj)
-            => obj == null || (obj.IsInvariant && obj.Operand is IEvaluatableToConstant);
-        protected override Type ObjType(T obj)
-            => obj.Operand.Type;
+        protected override IEnumerable<IRReturn> GetObjects()
+        {
+            HashSet<IRCodePart.IRFunction> functions = new HashSet<IRCodePart.IRFunction>();
+            HashSet<IRReturn> returns = new HashSet<IRReturn>(IRInstruction.ReferenceEqualityComparer);
+            Queue<PhiOperand> functionQueue = new Queue<PhiOperand>();
+            functionQueue.Enqueue(this);
+            while (functionQueue.Count > 0)
+            {
+                PhiOperand returnValue = functionQueue.Dequeue();
+                foreach (IRReturn obj in returnValue.PossibleValues.Where(kvp => kvp.Key.IsExecutable).Select(kvp => kvp.Value))
+                {
+                    foreach (IOperandInstructionBase inst in ((IOperandInstructionBase)obj).DepthFirst())
+                    {
+                        if (inst is IRCall call)
+                        {
+                            IRCodePart.IRFunction function = call.Block?.CodePart?.GetFunction(call);
+                            if (function != null && functions.Add(function))
+                            {
+                                functionQueue.Enqueue(function.Returns);
+                            }
+                        }
+                    }
+                    returns.Add(obj);
+                }
+            }
+
+            bool IsOrContainsFunctionRef(IInterimOperand operand)
+            {
+                if (operand is IRCall call &&
+                    functions.Contains(call.Block?.CodePart?.GetFunction(call)))
+                    return true;
+                if (operand is IOperandInstructionBase operandInstruction)
+                    return operandInstruction.AnyOperand(IsOrContainsFunctionRef);
+                return false;
+            }
+
+            returns.RemoveWhere(ret => IsOrContainsFunctionRef(ret.Value));
+            return returns;
+        }
+
+        protected override bool ObjIsInvariant(IRReturn obj)
+            => obj == null || (obj.IsInvariant && obj.Value is IEvaluatableToConstant);
+        protected override Type ObjType(IRReturn obj)
+            => obj.Value.Type;
 
         public override InterimConstantValue Evaluate()
         {
@@ -652,37 +760,38 @@ namespace kOS.Safe.Compilation.IR
             return base.Evaluate();
         }
 
-        protected override InterimConstantValue EvaluateObj(T obj)
-            => (obj.Operand as IEvaluatableToConstant)?.Evaluate();
+        protected override InterimConstantValue EvaluateObj(IRReturn obj)
+            => (obj.Value as IEvaluatableToConstant)?.Evaluate();
 
         protected override void MutateEachOperand(Func<IInterimOperand, IInterimOperand> mutateFunc)
         {
             foreach (BasicBlock block in PossibleValues.Keys)
-                PossibleValues[block].Operand = mutateFunc(PossibleValues[block].Operand);
+                PossibleValues[block].Value = mutateFunc(PossibleValues[block].Value);
         }
-        protected override IInterimOperand ValueAsOperand(T item)
-            => item.Operand;
+        protected override IInterimOperand ValueAsOperand(IRReturn item)
+            => item.Value;
     }
     
     public abstract class PhiNode<T> : IMultipleOperandInstruction
     {
+        protected IEqualityComparer<T> objComparer = EqualityComparer<T>.Default;
         public virtual bool IsInvariant
         {
             get
             {
-                IEnumerable<KeyValuePair<BasicBlock, T>> reachableValues =
-                    PossibleValues.Where(kvp => kvp.Key.IsExecutable);
+                IEnumerable<T> reachableValues = GetObjects();
                 // Return true if there is exactly one reachable value and it is invariant.
-                return reachableValues.Distinct().Count() == 1 && ObjIsInvariant(reachableValues.First().Value);
+                return reachableValues.Distinct(objComparer).Count() == 1 && ObjIsInvariant(reachableValues.First());
             }
         }
+        protected virtual IEnumerable<T> GetObjects()
+            => PossibleValues.Where(kvp => kvp.Key.IsExecutable).Select(kvp => kvp.Value);
         protected abstract bool ObjIsInvariant(T obj);
         public virtual Type Type
         {
             get
             {
-                IEnumerable<T> reachableValues =
-                    PossibleValues.Where(kvp => kvp.Key.IsExecutable).Select(kvp => kvp.Value);
+                IEnumerable<T> reachableValues = GetObjects();
                 if (!reachableValues.Any())
                     return null;
                 Type proposedType = ObjType(reachableValues.FirstOrDefault());

@@ -923,7 +923,7 @@ namespace kOS.Safe.Test.Execution
             Safe.Compilation.Optimization.Passes.BlockOrdering.IdentifyBranch(codePart.MainCode[0], null, out Safe.Compilation.Optimization.Passes.BlockOrdering.BranchData branchData);
             Assert.AreEqual(1, branchData.ifBlock?.ID);
             Assert.AreEqual(3, branchData.elseBlock?.ID);
-            Safe.Compilation.Optimization.Passes.BlockOrdering.IdentifyBranch(branchData.elseBlock, null, out Safe.Compilation.Optimization.Passes.BlockOrdering.BranchData branchData2);
+            Safe.Compilation.Optimization.Passes.BlockOrdering.IdentifyBranch(branchData.elseBlock, branchData.exit, out Safe.Compilation.Optimization.Passes.BlockOrdering.BranchData branchData2);
             Assert.AreEqual(4, branchData2.ifBlock?.ID);
             Assert.IsNull(branchData2.elseBlock);
             Assert.AreSame(branchData.exit, branchData2.exit);
@@ -941,7 +941,7 @@ namespace kOS.Safe.Test.Execution
             Safe.Compilation.Optimization.Passes.BlockOrdering.IdentifyBranch(codePart.MainCode[0], null, out Safe.Compilation.Optimization.Passes.BlockOrdering.BranchData branchData);
             Assert.AreEqual(1, branchData.ifBlock?.ID);
             Assert.AreEqual(3, branchData.elseBlock?.ID);
-            Safe.Compilation.Optimization.Passes.BlockOrdering.IdentifyBranch(branchData.elseBlock, null, out Safe.Compilation.Optimization.Passes.BlockOrdering.BranchData branchData2);
+            Safe.Compilation.Optimization.Passes.BlockOrdering.IdentifyBranch(branchData.elseBlock, branchData.exit, out Safe.Compilation.Optimization.Passes.BlockOrdering.BranchData branchData2);
             Assert.AreEqual(4, branchData2.ifBlock?.ID);
             Assert.AreEqual(6, branchData2.elseBlock?.ID);
             Assert.AreSame(branchData.exit, branchData2.exit);

@@ -50,7 +50,10 @@ namespace kOS.Safe.Compilation.IR
                         funcCallTrees[function].UnionWith(function.FunctionCalls);
                 }
                 else
+                {
                     funcCallTrees.Add(function, new HashSet<IRFunction>(function.FunctionCalls));
+                    same = false;
+                }
                 
                 // Also require that the function's terminal block IncomingVariables is unchanged.
                 // We'll use that the propagate ExternalSet SSA definitions at call sites.
@@ -60,18 +63,21 @@ namespace kOS.Safe.Compilation.IR
                 if (!setsEqual)
                     externalSets[function] = new Dictionary<(string, IRScope), SSADefinition>(function.TerminalBlock.IncomingVariableDefinitions);
 
-                foreach (IRFunction callee in function.FunctionCalls)
+                if (!same)
                 {
-                    if (callers.TryGetValue(callee, out HashSet<IRFunction> callerSet))
-                        callerSet.Add(function);
-                    else
-                        callers.Add(callee, new HashSet<IRFunction>() { function });
-                }
-                if (callers.ContainsKey(function))
-                {
-                    foreach (IRFunction caller in callers[function])
+                    foreach (IRFunction callee in function.FunctionCalls)
                     {
-                        functionQueue.Enqueue(caller);
+                        if (callers.TryGetValue(callee, out HashSet<IRFunction> callerSet))
+                            callerSet.Add(function);
+                        else
+                            callers.Add(callee, new HashSet<IRFunction>() { function });
+                    }
+                    if (callers.ContainsKey(function))
+                    {
+                        foreach (IRFunction caller in callers[function])
+                        {
+                            functionQueue.Enqueue(caller);
+                        }
                     }
                 }
             }
@@ -537,7 +543,7 @@ namespace kOS.Safe.Compilation.IR
                         }
 
                         // Manage incoming stack
-                        SetIncomingStackState(block, predecessor, stackOut, ref stackDepthSetBy, ref stackDepth, stackAdoptsTypeHints);
+                        SetIncomingStackState(block, predecessor, stackOut, ref stackDepthSetBy, ref stackDepth, worklist, stackAdoptsTypeHints);
                     }
                 }
 
@@ -549,7 +555,7 @@ namespace kOS.Safe.Compilation.IR
                 {
                     List<(BasicBlock, IRScope, SSADefinition)> globalNullVars = new List<(BasicBlock, IRScope, SSADefinition)>();
                     foreach (IGrouping<SSADefinition, (BasicBlock Block, IRScope Scope, SSADefinition)> globalDef in
-                        varsIn.Where(v => v.Scope.IsGlobalScope).GroupBy(v => v.Variable))
+                        varsIn.Where(v => v.Scope.IsGlobalScope).GroupBy(v => v.Variable, SSADefinition.ReferenceEqualityComparer))
                     {
                         IRScope scope = globalDef.First().Scope;
                         foreach (BasicBlock predecessor in block.Predecessors.Except(globalDef.Select(v => v.Block)))
@@ -606,25 +612,42 @@ namespace kOS.Safe.Compilation.IR
             }
         }
 
-        private static void SetIncomingStackState(BasicBlock block, BasicBlock predecessor, Dictionary<BasicBlock, List<IStackTransferObject>> stackOut, ref BasicBlock stackDepthSetBy, ref int stackDepth, bool stackAdoptsTypeHints)
+        private static void SetIncomingStackState(BasicBlock block, BasicBlock predecessor, Dictionary<BasicBlock, List<IStackTransferObject>> stackOut, ref BasicBlock stackDepthSetBy, ref int stackDepth, Queue<BasicBlock> worklist, bool stackAdoptsTypeHints)
         {
             if (stackOut.TryGetValue(predecessor, out List<IStackTransferObject> predStackOut))
             {
-                if (predecessor.Predecessors.Count == 1 &&
-                    predecessor.Predecessors.First().Instructions.Any() &&
-                    predecessor.Predecessors.First().Continuation is BranchContinuation branch &&
+                if (block.Dominator?.Continuation is BranchContinuation branch &&
                     branch.Condition is IRNonVarPush testArgBottom &&
-                    testArgBottom.Operation is OpcodeTestArgBottom &&
-                    predecessor == branch.True)
+                    testArgBottom.Operation is OpcodeTestArgBottom)
                 {
-                    predStackOut = new List<IStackTransferObject>(predStackOut);
-                    predStackOut.RemoveAt(predStackOut.Count - 1);
+                    if (block == branch.True)
+                    {
+                        // This block adds an optional parameter
+                        if (predStackOut.Count == 0)
+                        {
+                            // The parent block doesn't know yet.
+                            AddParameterToPredecessors(IRPushStack.ExternalPush(), block, stackOut, worklist);
+                            block.IncomingStackState.RemoveAt(block.IncomingStackState.Count - 1);
+                        }
+                        else if (predStackOut.Count > 0 && block.IncomingStackState.Count > 0 &&
+                            predStackOut[0] == block.IncomingStackState[0])
+                        {
+                            block.IncomingStackState.RemoveAt(0);
+                        }
+                        predStackOut = new List<IStackTransferObject>(predStackOut);
+                        predStackOut.RemoveAt(0);
+                    }
                 }
+                if (predStackOut.Count < block.IncomingStackState.Count)
+                {
+                    worklist.Enqueue(predecessor);
+                    return;
+                }
+
                 // Verify that the stack depth is consistent
                 // If the stack depth was not set by a root block and if the incoming stack depth does not match the stack depth, that's a problem.
                 // If the list is nonzero in length and it doesn't match the incoming stack depth, that's a problem.
-                if (((stackDepthSetBy?.Predecessors.Count ?? 0) != 0 && stackDepth != predStackOut.Count) ||
-                    (block.IncomingStackState.Count != 0 && predStackOut.Count != block.IncomingStackState.Count))
+                if (predStackOut.Count < block.IncomingStackState.Count)
                     throw new Exceptions.KOSCompileException(new KS.Token(), "Stack depth is inconsistent - the CFG is not well-structured.");
                 stackDepth = predStackOut.Count;
                 if (predecessor.Predecessors.Count > 0)
@@ -668,9 +691,33 @@ namespace kOS.Safe.Compilation.IR
         }
         public static List<IStackTransferObject> GetOutgoingStack(BasicBlock block)
             => PopulateParameters(block, null, null, false);
+        private static void AddParameterToPredecessors(IStackTransferObject parameter, BasicBlock originator, Dictionary<BasicBlock, List<IStackTransferObject>> stackOut, Queue<BasicBlock> worklist)
+        {
+            HashSet<BasicBlock> addedTo = new HashSet<BasicBlock>();
+            Queue<BasicBlock> addTo = new Queue<BasicBlock>();
+            addTo.Enqueue(originator);
+            while (addTo.Count > 0)
+            {
+                BasicBlock current = addTo.Dequeue();
+                if (addedTo.Add(current))
+                {
+                    if (current != originator && stackOut.ContainsKey(current))
+                    {
+                        stackOut[current].Add(parameter);
+                        foreach (BasicBlock successor in current.Successors.Where(b => !worklist.Contains(b)))
+                            worklist.Enqueue(successor);
+                    }
+                    current.IncomingStackState.Add(parameter);
+                    foreach (BasicBlock predecessor in current.Predecessors)
+                        addTo.Enqueue(predecessor);
+                }
+            }
+        }
         private static List<IStackTransferObject> PopulateParameters(BasicBlock block, Dictionary<BasicBlock, List<IStackTransferObject>> stackOut, Queue<BasicBlock> worklist, bool setValues = true)
         {
             List<IStackTransferObject> stack = new List<IStackTransferObject>(block.IncomingStackState);
+            if (block is SyntheticReturnBlock)
+                return stack;
             foreach (IOperandInstructionBase operandInstruction in block.DepthFirstOperandInstructions())
             {
                 operandInstruction.ForEachOperand(op =>
@@ -680,25 +727,7 @@ namespace kOS.Safe.Compilation.IR
                         if (stack.Count == 0)
                         {
                             IRPushStack externalPush = IRPushStack.ExternalPush();
-                            HashSet<BasicBlock> addedTo = new HashSet<BasicBlock>();
-                            Queue<BasicBlock> addTo = new Queue<BasicBlock>();
-                            addTo.Enqueue(block);
-                            while (addTo.Count > 0)
-                            {
-                                BasicBlock current = addTo.Dequeue();
-                                if (addedTo.Add(current))
-                                {
-                                    if (current != block && stackOut.ContainsKey(current))
-                                    {
-                                        stackOut[current].Add(externalPush);
-                                        foreach (BasicBlock successor in current.Successors.Where(b => !worklist.Contains(b)))
-                                            worklist.Enqueue(successor);
-                                    }
-                                    current.IncomingStackState.Add(externalPush);
-                                    foreach (BasicBlock predecessor in current.Predecessors)
-                                        addTo.Enqueue(predecessor);
-                                }
-                            }
+                            AddParameterToPredecessors(externalPush, block, stackOut, worklist);
                             stack.Add(externalPush);
                         }
                         if (setValues)
@@ -712,28 +741,38 @@ namespace kOS.Safe.Compilation.IR
                     }
                     else if (op is IRCall call)
                     {
-                        while (stack.Count > 0)
+                        if (!call.Closed)
                         {
-                            IStackTransferObject stackValue = stack[0];
-                            stack.RemoveAt(0);
-
-                            if (IsOrContainsArgMarker(stackValue))
+                            while (stack.Count > 0)
                             {
-                                if (stackValue is StackTransferPhi phi &&
-                                    phi.PossibleValues.Values.Any(v => !IsOrContainsArgMarker(v)))
-                                    throw new Exceptions.KOSCompileException(new KS.LineCol(call.SourceLine, call.SourceColumn),
-                                        "Cannot handle a variable number of arguments to a function");
-                                foreach (IRPushStackArgMarker argMarker in GetArgMarkerPushes(stackValue))
-                                    argMarker.Call = call;
-                                break;
+                                IStackTransferObject stackValue = stack[0];
+                                stack.RemoveAt(0);
+
+                                if (IsOrContainsArgMarker(stackValue))
+                                {
+                                    if (stackValue is StackTransferPhi phi &&
+                                        phi.PossibleValues.Values.Any(v => !IsOrContainsArgMarker(v)))
+                                        throw new Exceptions.KOSCompileException(new KS.LineCol(call.SourceLine, call.SourceColumn),
+                                            "Cannot handle a variable number of arguments to a function");
+                                    foreach (IRPushStackArgMarker argMarker in GetArgMarkerPushes(stackValue))
+                                        argMarker.Call = call;
+                                    if (!call.Direct)
+                                    {
+                                        stackValue = stack[0];
+                                        stack.RemoveAt(0);
+                                        IRParameter indirectParameter = new IRParameter(block.IncomingStackState.IndexOf(stackValue), block) { StackTransferObject = stackValue };
+                                        call.IndirectMethod = indirectParameter;
+                                    }
+                                    break;
+                                }
+
+                                if (!setValues)
+                                    continue;
+
+                                IRParameter newParameter = new IRParameter(block.IncomingStackState.IndexOf(stackValue), block) { StackTransferObject = stackValue };
+                                call.Arguments.Insert(0, newParameter);
+                                newParameter.RequiredToBeResolvable.UnionWith(GetFollowingParameters(call, newParameter));
                             }
-
-                            if (!setValues)
-                                continue;
-
-                            IRParameter newParameter = new IRParameter(block.IncomingStackState.IndexOf(stackValue), block) { StackTransferObject = stackValue };
-                            call.Arguments.Insert(0, newParameter);
-                            newParameter.RequiredToBeResolvable.UnionWith(GetFollowingParameters(call, newParameter));
                         }
                     }
                 });
@@ -751,9 +790,9 @@ namespace kOS.Safe.Compilation.IR
                 if (definitionSet.Select(def => (def.Scope, def.Variable)).Distinct(PhiComparer.Instance).Skip(1).Any())
                 {
                     // Phi required
-                    if (!block.Phis.TryGetValue(definitionSet.Key, out PhiNode phiVar))
+                    if (!block.Phis.TryGetValue(definitionSet.Key, out PhiNodeSSA phiVar))
                     {
-                        phiVar = new PhiNode(definitionSet.Key.Name);
+                        phiVar = new PhiNodeSSA(definitionSet.Key.Name);
                         block.Phis.Add(definitionSet.Key, phiVar);
                     }
 
@@ -770,7 +809,7 @@ namespace kOS.Safe.Compilation.IR
                 {
                     if (block.Phis.ContainsKey(definitionSet.Key))
                     {
-                        PhiNode phiVar = block.Phis[definitionSet.Key];
+                        PhiNodeSSA phiVar = block.Phis[definitionSet.Key];
                         foreach (SSADefinition definition in phiVar.Result.Replaces)
                             definition.ReplacedBy.Remove(phiVar.Result);
                         block.Phis.Remove(definitionSet.Key);
@@ -866,8 +905,12 @@ namespace kOS.Safe.Compilation.IR
             Dictionary<(string Name, IRScope Scope), SSADefinition> liveDefinitions =
                 new Dictionary<(string, IRScope), SSADefinition>();
 
-            if (block.IncomingVariableDefinitions == null && !block.Predecessors.Any())
+            if (block.IncomingVariableDefinitions == null)
+            {
                 block.IncomingVariableDefinitions = new Dictionary<(string Name, IRScope Scope), SSADefinition>();
+                block.Scope = block.CodeComponent.RootBlock.Scope.GetGlobalScope();
+                return;
+            }
 
             foreach (KeyValuePair<(string Name, IRScope Scope), SSADefinition> definition in block.IncomingVariableDefinitions)
                 liveDefinitions[definition.Key] = definition.Value;
@@ -1085,16 +1128,21 @@ namespace kOS.Safe.Compilation.IR
                     !fragment.Function.IsGlobal) ||
                     overrideParameterProtection)
                 {
-                    foreach (IRParameter parameter in assignment.GetOperandsWhere(op => op is IRParameter).Cast<IRParameter>())
+                    if (!overrideParameterProtection)
                     {
-                        int index = GetParameterIndex(assignment.Block.CodeComponent, parameter);
-                        if (parameter.StackTransferObject is StackTransferPhi stackTransferPhi)
-                            stackTransferPhi.RemoveReference(parameter);
-                        parameter.StackTransferObject = null;
-                        foreach (IRCall call in fragment?.Function.CallSites)
+                        foreach (IRParameter parameter in assignment.GetOperandsWhere(op => op is IRParameter).Cast<IRParameter>())
                         {
-                            if (call.Arguments.Count > index)
-                                call.Arguments.RemoveAt(index);
+                            if (parameter.IsResolvable)
+                                continue;
+                            int index = GetParameterIndex(assignment.Block.CodeComponent, parameter);
+                            if (parameter.StackTransferObject is StackTransferPhi stackTransferPhi)
+                                stackTransferPhi.RemoveReference(parameter);
+                            parameter.StackTransferObject = null;
+                            foreach (IRCall call in fragment.Function.CallSites)
+                            {
+                                if (call.Arguments.Count > index)
+                                    call.Arguments.RemoveAt(index);
+                            }
                         }
                     }
 
@@ -1141,8 +1189,10 @@ namespace kOS.Safe.Compilation.IR
             // Convert subsequent assignments to be declarative
             foreach (IRAssign nextAssign in definition.ReplacedBy.
                 Where(ssaDef => ssaDef.State == SSADefinition.SetState.Set).
-                Select(ssaDef => ssaDef.GetSetDefinition().DefinedAt))
+                Select(ssaDef => ssaDef.GetSetDefinition()?.DefinedAt))
             {
+                if (nextAssign == null)
+                    continue;
                 nextAssign.Scope = IRAssign.StoreScope.Local;
                 nextAssign.AssertExists = false;
             }

@@ -51,7 +51,12 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                         if (!ParameterCanBeReplaced(parameter.StackTransferObject))
                             return op;
 
-                        return CreateOperand(parameter.StackTransferObject, block, eliminatedItems);
+                        IInterimOperand result = CreateOperand(parameter.StackTransferObject, block, eliminatedItems);
+                        if (result is TernaryOperand ternary)
+                            foreach (IOperandInstructionBase opInst in ternary.DepthFirst())
+                                if (opInst is IRInstruction instruction)
+                                    instruction.Block = block;
+                        return result;
                     });
                 }
             }
@@ -99,7 +104,9 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 case IRPushStack pushStack:
                     if (!pushStack.Block.Instructions.Remove(pushStack))
                         throw new InvalidOperationException();
-                    return pushStack.Value.Clone(block, true);
+                    IInterimOperand result = pushStack.Value;
+                    pushStack.Value = null;
+                    return result;
                 case StackTransferPhi phi:
                     BranchContinuation branch = GetBranch(phi.PossibleValues.Select(kvp => kvp.Key));
                     IInterimOperand condition = branch.Condition;

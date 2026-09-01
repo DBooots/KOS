@@ -181,6 +181,35 @@ namespace kOS.Safe.Compilation.IR
         public override string ToString()
             => string.Format("{{store {0} -> {1}}}", Value.ToString(), Target.ToString());
     }
+
+    public class IREval : IRUnaryOp, IResultingInstruction, IEvaluatableToConstant
+    {
+        public bool BarewordOkay { get; } = false;
+        public override bool IsInvariant => false;
+        public override Type Type => Operand is InterimResolvedReference resolvedReference ? resolvedReference.Type : typeof(Encapsulation.Structure);
+        public IREval(BasicBlock block, OpcodeEval operation, IInterimOperand operand) : base(block, operation, operand)
+        {
+            BarewordOkay = operation.BarewordOkay;
+        }
+
+        protected IREval(BasicBlock block, IREval cloneFrom, bool maintainSSAReferences) : base(block, cloneFrom, maintainSSAReferences)
+        {
+            BarewordOkay = cloneFrom.BarewordOkay;
+        }
+
+        public override IRInstruction Clone(BasicBlock block, bool maintainSSAReferences = false)
+            => new IREval(block ?? Block, this, maintainSSAReferences);
+        IInterimOperand IInterimOperand.Clone(BasicBlock block, bool maintainSSAReferences)
+            => new IREval(block ?? Block, this, maintainSSAReferences);
+
+        public override bool Equals(IInterimOperand other)
+            => other == this;
+        public override bool Equals(object obj)
+            => obj == this;
+        public override int GetHashCode()
+            => base.GetHashCode();
+    }
+
     public class IRBinaryOp : MultipleOperandInstruction, IResultingInstruction
     {
         public override bool IsInvariant => Left.IsInvariant && Right.IsInvariant;
@@ -439,7 +468,7 @@ namespace kOS.Safe.Compilation.IR
         public override bool IsInvariant => Operand.IsInvariant && !(Operation is OpcodeExists);
         public Opcode Operation { get; }
         public IInterimOperand Operand { get => operand; set => operand = value; }
-        public Type Type
+        public virtual Type Type
         {
             get
             {
@@ -476,7 +505,7 @@ namespace kOS.Safe.Compilation.IR
         }
         protected IRUnaryOp(BasicBlock block, IRUnaryOp cloneFrom, bool maintainSSAReferences) : base(cloneFrom, block)
         {
-            Operation = cloneFrom.CloneOperation();
+            Operation = SetSourceLocation(cloneFrom.CloneOperation());
             Operand = cloneFrom.Operand.Clone(block, maintainSSAReferences);
         }
 
@@ -496,6 +525,8 @@ namespace kOS.Safe.Compilation.IR
                     return new OpcodeLogicToBool();
                 case OpcodeMathNegate _:
                     return new OpcodeMathNegate();
+                case OpcodeEval _:
+                    return new OpcodeEval();
                 default:
                     throw new NotImplementedException();
             }
@@ -509,7 +540,7 @@ namespace kOS.Safe.Compilation.IR
         }
         public override string ToString()
             => Operation.ToString();
-        public bool Equals(IInterimOperand other)
+        public virtual bool Equals(IInterimOperand other)
             => (other is IRUnaryOp unaryOp &&
                 Operation.GetType() == unaryOp.Operation.GetType() &&
                 Operand.Equals(unaryOp.Operand)) ||
@@ -524,7 +555,7 @@ namespace kOS.Safe.Compilation.IR
         public override int GetHashCode()
             => (Operation.GetType(), Operand).GetHashCode();
 
-        public InterimConstantValue Evaluate()
+        public virtual InterimConstantValue Evaluate()
         {
             if (!IsInvariant)
                 throw new InvalidOperationException();
@@ -581,8 +612,8 @@ namespace kOS.Safe.Compilation.IR
                 case OpcodePushScope pushScope:
                     Operation = new OpcodePushScope(pushScope.ScopeId, pushScope.ParentScopeId);
                     break;
-                case OpcodePopScope _:
-                    Operation = new OpcodePopScope();
+                case OpcodePopScope popScope:
+                    Operation = new OpcodePopScope(popScope.NumLevels);
                     break;
                 default:
                     throw new NotImplementedException();
@@ -1089,17 +1120,25 @@ namespace kOS.Safe.Compilation.IR
         }
         public IInterimOperand IndirectMethod { get; internal set; }
         public bool Direct { get; }
-        public bool EmitArgMarker => Arguments.Where(arg => arg is IRParameter).Cast<IRParameter>().All(IRParameter.IsSetResolvable);
-        private IRCall(BasicBlock block, OpcodeCall opcode) : base(opcode, block)
+        /// <summary>
+        /// Gets or sets a value indicating whether this <see cref="IRCall"/>
+        /// has been provided with all arguments and an argument marker.
+        /// </summary>
+        public bool Closed { get; set; }
+        public bool EmitArgMarker => Closed || Arguments.Where(arg => arg is IRParameter).Cast<IRParameter>().All(IRParameter.IsSetResolvable);
+        private IRCall(BasicBlock block, OpcodeCall opcode, bool argMarkerProvided) : base(opcode, block)
         {
             Function = (string)opcode.Destination;
             Direct = opcode.Direct;
+            Closed = argMarkerProvided;
         }
         protected IRCall(BasicBlock block, IRCall cloneFrom, bool maintainSSAReferences) : base(cloneFrom, block)
         {
             Function = cloneFrom.Function;
             Direct = cloneFrom.Direct;
+            Closed = cloneFrom.Closed;
             Arguments.AddRange(cloneFrom.Arguments.Select(arg => arg.Clone(block, maintainSSAReferences)));
+            block.CodePart.GetFunction(this)?.CallSites.Add(this);
         }
         protected bool IsSelfInvariant
         {
@@ -1116,7 +1155,7 @@ namespace kOS.Safe.Compilation.IR
                 return false;
             }
         }
-        public bool IsInert
+        public virtual bool IsInert
         {
             get
             {
@@ -1152,23 +1191,17 @@ namespace kOS.Safe.Compilation.IR
             yield return SetSourceLocation(new OpcodeCall(Function));
         }
 
-        public IRCall(BasicBlock block, OpcodeCall opcode, IInterimOperand argument) : this(block, opcode)
+        public IRCall(BasicBlock block, OpcodeCall opcode, bool argMarkerProvided, IInterimOperand argument) : this(block, opcode, argMarkerProvided)
         {
             Arguments.Add(argument);
         }
-        public IRCall(BasicBlock block, OpcodeCall opcode, IEnumerable<IInterimOperand> arguments) : this(block, opcode)
+        public IRCall(BasicBlock block, OpcodeCall opcode, bool argMarkerProvided, IEnumerable<IInterimOperand> arguments) : this(block, opcode, argMarkerProvided)
         {
             Arguments.AddRange(arguments);
         }
-        public IRCall(BasicBlock block, OpcodeCall opcode, params IInterimOperand[] arguments) : this(block, opcode)
+        public IRCall(BasicBlock block, OpcodeCall opcode, params IInterimOperand[] arguments) : this(block, opcode, true)
         {
             Arguments.AddRange(arguments);
-        }
-        protected IRCall(IRCall call) : base(new OpcodeCall(call.Function), call.Block)
-        {
-            Arguments = call.Arguments.ToList();
-            Function = call.Function;
-            Direct = true;
         }
         public override string ToString()
             => string.Format("{{call {0}({1})}}", Function.Trim('(', ')'), string.Join(",", Arguments.Select(a => a.ToString())));
@@ -1211,6 +1244,40 @@ namespace kOS.Safe.Compilation.IR
             return new InterimConstantValue(interimCPU.PopValueArgument(), this);
         }
     }
+
+    public class IRRun : IRCall, IInterimOperand
+    {
+        public override bool IsInert => false;
+        public override bool IsInvariant => false;
+        public string DestinationLabel { get; }
+
+        public IRRun(BasicBlock block, OpcodeCall opcode, IEnumerable<IInterimOperand> arguments) : base(block, opcode, true, arguments)
+        {
+            DestinationLabel = opcode.DestinationLabel;
+        }
+
+        protected IRRun(BasicBlock block, IRRun cloneFrom, bool maintainSSAReferences) : base(block, cloneFrom, maintainSSAReferences)
+        {
+            DestinationLabel = cloneFrom.DestinationLabel;
+        }
+
+        public override IRInstruction Clone(BasicBlock block, bool maintainSSAReferences = false)
+            => new IRRun(block, this, maintainSSAReferences);
+        IInterimOperand IInterimOperand.Clone(BasicBlock block, bool maintainSSAReferences)
+            => new IRRun(block ?? Block, this, maintainSSAReferences);
+
+        public override IEnumerable<Opcode> EmitOpcodes()
+        {
+            yield return new OpcodePush(new Execution.KOSArgMarkerType());
+            foreach (Opcode opcode in base.EmitOpcodes())
+                yield return opcode;
+        }
+        public override int GetHashCode()
+            => Arguments.First(a => !(a is InterimConstantValue constant && constant.Value is Encapsulation.BooleanValue)).GetHashCode();
+        public override string ToString()
+            => string.Format("{{run {0}}}", string.Join(",", Arguments.Reverse<IInterimOperand>().Select(a => a.ToString())));
+    }
+
     public class IRReturn : SingleOperandInstruction
     {
         public override bool IsInvariant => Value.IsInvariant;

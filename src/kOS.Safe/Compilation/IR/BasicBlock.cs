@@ -94,8 +94,8 @@ namespace kOS.Safe.Compilation.IR
         /// <remarks>
         /// This data is populated during <see cref="SingleStaticAssignment.FinalizeSSA(IRCodePart)"/>.
         /// </remarks>
-        public Dictionary<(string Name, IRScope Scope), PhiNode> Phis { get; } =
-            new Dictionary<(string Name, IRScope Scope), PhiNode>();
+        public Dictionary<(string Name, IRScope Scope), PhiNodeSSA> Phis { get; } =
+            new Dictionary<(string Name, IRScope Scope), PhiNodeSSA>();
         /// <summary>
         /// Gets the set of incoming SSA variables that this block
         /// receives, including the results of any phi functions.
@@ -146,7 +146,7 @@ namespace kOS.Safe.Compilation.IR
         public BasicBlock Dominator
         {
             get => dominator;
-            private set
+            internal set
             {
                 dominator?.dominates.Remove(this);
                 dominator = value;
@@ -187,7 +187,7 @@ namespace kOS.Safe.Compilation.IR
         /// Gets or sets the <see cref="IRJump"/> instruction that this
         /// block will terminate with if it does not branch to another.
         /// </summary>
-        public BlockContinuation Continuation
+        public virtual BlockContinuation Continuation
         {
             get => continuation;
             set
@@ -285,6 +285,8 @@ namespace kOS.Safe.Compilation.IR
             {
                 successors.Remove(oldSuccessor);
                 oldSuccessor.predecessors.Remove(this);
+                if (oldSuccessor.Predecessors.Count == 0)
+                    oldSuccessor.Dominator = null;
             }
             foreach (ICodeComponent component in new[] { this }.Concat(added.Concat(removed)).Select(b => b.CodeComponent).Distinct())
             {
@@ -465,6 +467,11 @@ namespace kOS.Safe.Compilation.IR
     public sealed class SyntheticReturnBlock : BasicBlock
     {
         public const string syntheticReturnLabel = "syntheticReturn";
+        public override BlockContinuation Continuation
+        {
+            get => base.Continuation;
+            set => throw new InvalidOperationException();
+        }
         public SyntheticReturnBlock(IRCodePart codePart) : base(codePart, -1, -1, syntheticReturnLabel)
         {
         }

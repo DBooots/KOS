@@ -182,8 +182,8 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             // they just shouldn't be optimized away.
             if (obj is IRCall call &&
                 !Optimizer.AllowClobberBuiltins &&
-                (call.Function.Equals("print()", StringComparison.OrdinalIgnoreCase) ||
-                 call.Function.Equals("printat()", StringComparison.OrdinalIgnoreCase)))
+                ((call.Function?.Equals("print()", StringComparison.OrdinalIgnoreCase) ?? false) ||
+                 (call.Function?.Equals("printat()", StringComparison.OrdinalIgnoreCase) ?? false)))
                 return false;
             if (obj is IRNoStackInstruction noStackInstruction &&
                 noStackInstruction.Operation is OpcodeArgBottom)
@@ -354,7 +354,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     continue;
                 IOperandInstructionBase use = uses.FirstOrDefault(u => u is IActionInstruction && !(u is IRCall));
                 if (use == null ||
-                    use is PhiNode)
+                    use is PhiNodeSSA)
                     continue;
                 if (uses.Count == 2)
                 {

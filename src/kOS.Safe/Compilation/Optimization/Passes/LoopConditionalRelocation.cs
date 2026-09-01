@@ -34,6 +34,12 @@ namespace kOS.Safe.Compilation.Optimization.Passes
         {
             BasicBlock header = loopData.header;
             BasicBlock block = loopData.body;
+
+            if (block.Instructions.Count == 1 &&
+                block.Instructions.First() is IRUnaryConsumer unaryConsumer &&
+                unaryConsumer.Operation is OpcodeWait)
+                return;
+
             while (block.PostDominator?.Dominator == block)
                 block = block.PostDominator;
 
@@ -52,10 +58,10 @@ namespace kOS.Safe.Compilation.Optimization.Passes
         public static List<BlockOrdering.LoopData> FindLoops(BasicBlock root, Stack<BasicBlock> regionExits)
         {
             List<BlockOrdering.LoopData> loopData = new List<BlockOrdering.LoopData>();
-            FindLoops(root, regionExits, loopData, false);
+            FindLoops(root, regionExits, loopData, null);
             return loopData;
         }
-        private static void FindLoops(BasicBlock root, Stack<BasicBlock> regionExits, List<BlockOrdering.LoopData> loops, bool fromLoop)
+        private static void FindLoops(BasicBlock root, Stack<BasicBlock> regionExits, List<BlockOrdering.LoopData> loops, BlockOrdering.LoopData? fromLoop)
         {
             BasicBlock block = root;
             while (block != null && block != regionExits.Peek())
@@ -64,14 +70,13 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 // If root == loopData.body it's because this was just called recursively
                 // below. This can be treated as not a loop since it is already identified
                 // as a loop body.
-                if (BlockOrdering.IdentifyLoop(block, regionExits.Peek(), out BlockOrdering.LoopData loopData))
+                if (BlockOrdering.IdentifyLoop(block, regionExits.Peek(), out BlockOrdering.LoopData loopData) && !loopData.Equals(fromLoop))
                 {
-                    if (!fromLoop || root != loopData.body)
-                        loops.Add(loopData);
+                    loops.Add(loopData);
                     if (root != loopData.body)
                     {
                         regionExits.Push(loopData.exit);
-                        FindLoops(loopData.body, regionExits, loops, true);
+                        FindLoops(loopData.body, regionExits, loops, loopData);
                         regionExits.Pop();
                     }
                     block = loopData.exit;
@@ -81,17 +86,17 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 else if (BlockOrdering.IdentifyBranch(block, regionExits.Peek(), out BlockOrdering.BranchData branchData) &&
                     branchData.elseBlock != root && branchData.ifBlock != root)
                 {
-                    regionExits.Push(branchData.exit ?? regionExits.Peek());
-                    FindLoops(branchData.ifBlock, regionExits, loops, false);
+                    regionExits.Push(branchData.exit);
+                    FindLoops(branchData.ifBlock, regionExits, loops, null);
                     regionExits.Pop();
-                    if (branchData.exit == null && branchData.elseBlock != null)
+                    if (branchData.exit == regionExits.Peek() && branchData.elseBlock != null)
                     {
                         block = branchData.elseBlock;
                     }
                     else
                     {
                         if (branchData.elseBlock != null)
-                            FindLoops(branchData.elseBlock, regionExits, loops, false);
+                            FindLoops(branchData.elseBlock, regionExits, loops, null);
                         block = branchData.exit;
                     }
                 }

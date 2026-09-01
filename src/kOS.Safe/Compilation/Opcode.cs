@@ -2304,7 +2304,8 @@ namespace kOS.Safe.Compilation
     {
         protected override string Name { get { return "eval"; } }
         public override ByteCode Code { get { return ByteCode.EVAL; } }
-        private bool barewordOkay;
+        private readonly bool barewordOkay;
+        public bool BarewordOkay => barewordOkay;
         
         public OpcodeEval()
         {

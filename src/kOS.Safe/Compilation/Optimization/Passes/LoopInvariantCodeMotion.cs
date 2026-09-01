@@ -58,7 +58,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             int originalCount = relocatedInstructions.Count;
 
             BasicBlock block = loop.body;
-            while (BlockOrdering.IsInsideRegion(block, loop.exit))
+            while (BlockOrdering.IsInsideRegion(block, loop.body, loop.exit))
             {
                 // Walk each instruction
                 for (int i = 0; i < block.Instructions.Count; i++)

@@ -43,11 +43,8 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             scopes.ExceptWith(removedScopes);
             foreach (BasicBlock block in code)
             {
-                if (block.Instructions.Count > 0 &&
-                    !(block.Instructions.Last() is IRReturn))
-                    continue;
-
-                AttemptPopReturnCollapse(block, block);
+                if (block.Instructions.LastOrDefault() is IRReturn)
+                    AttemptPopReturnCollapse(block, block);
             }
         }
 
@@ -63,6 +60,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             }
             foreach (BasicBlock block in scope.Blocks.ToArray())
                 block.Scope = newScope;
+            // Removes this scope from the parent scope's list of children
             scope.ParentScope = null;
         }
         private static OpcodePushScope GetPushOpcode(IRScope scope)

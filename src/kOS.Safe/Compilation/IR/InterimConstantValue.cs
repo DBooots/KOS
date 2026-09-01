@@ -189,7 +189,9 @@ namespace kOS.Safe.Compilation.IR
             AddToSet(parameter, pushes, parameters);
             if (pushes.Any(p => p.IsSelfResolvable == false))
                 return false;
-            return parameters.All(p => p.RequiredToBeResolvable.All(IsSetResolvable));
+            foreach (IRParameter required in parameters.SelectMany(p => p.RequiredToBeResolvable).ToArray())
+                AddToSet(required, pushes, parameters);
+            return pushes.All(p => p.IsSelfResolvable);
         }
         private static void AddToSet(IStackTransferObject push, HashSet<IStackTransferObject> pushSet, HashSet<IRParameter> paramSet)
         {
