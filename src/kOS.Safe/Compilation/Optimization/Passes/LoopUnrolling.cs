@@ -5,7 +5,7 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class LoopUnrolling : IOptimizationPass<ICodeComponent>, ILinkedOptimizationPass
+    public class LoopUnrolling : IOptimizationPass<CodeComponent>, ILinkedOptimizationPass
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Extreme;
 
@@ -14,9 +14,9 @@ namespace kOS.Safe.Compilation.Optimization.Passes
 
         private const int maxUnrolledSize = 100 * 10;
 
-        public void ApplyPass(IEnumerable<ICodeComponent> codeComponents)
+        public void ApplyPass(IEnumerable<CodeComponent> codeComponents)
         {
-            foreach (ICodeComponent component in codeComponents)
+            foreach (CodeComponent component in codeComponents)
                 ApplyPass(component.RootBlock);
         }
 
@@ -430,7 +430,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 IRScope scope = root.Scope;
                 while (scope != null)
                 {
-                    if (root.IncomingVariableDefinitions.TryGetValue((name, scope), out SSADefinition ssaDefinition))
+                    if (root.IncomingVariableDefinitions.TryGetValue(new SingleStaticAssignment.ScopeSlot(name, scope), out SSADefinition ssaDefinition))
                     {
                         replacements[ssaDefinition] = indices[name][index];
                         break;

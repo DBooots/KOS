@@ -52,7 +52,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 if (operand is IRCall suffixCall &&
                     !suffixCall.Direct &&
                     suffixCall.Arguments.Count == 0 &&
-                    suffixCall.IndirectMethod is IRSuffixGetMethod)
+                    suffixCall.TargetMethod is IRSuffixGetMethod)
                 {
                     return ReplaceParameterlessSuffix(suffixCall);
                 }
@@ -94,7 +94,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
 
         private static IRSuffixGet ReplaceParameterlessSuffix(IRCall call)
         {
-            IRSuffixGet suffixMethod = (IRSuffixGet)call.IndirectMethod;
+            IRSuffixGet suffixMethod = (IRSuffixGet)call.TargetMethod;
             return new IRSuffixGet(
                 call.Block,
                 suffixMethod.Object,

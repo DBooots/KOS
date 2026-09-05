@@ -5,15 +5,15 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class RedundantAssignmentElimination : IOptimizationPass<ICodeComponent>, ILinkedOptimizationPass
+    public class RedundantAssignmentElimination : IOptimizationPass<CodeComponent>, ILinkedOptimizationPass
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Balanced;
         public short SortIndex => 4100;
         public Optimizer Optimizer { get; set; }
 
-        public void ApplyPass(IEnumerable<ICodeComponent> code)
+        public void ApplyPass(IEnumerable<CodeComponent> code)
         {
-            foreach (ICodeComponent codeComponent in code)
+            foreach (CodeComponent codeComponent in code)
             {
                 Queue<(IRAssign, IOperandInstructionBase)> singleUseVariables = new Queue<(IRAssign, IOperandInstructionBase)>(GetSingleUseAssignments(codeComponent));
                 Dictionary<IOperandInstructionBase, IOperandInstructionBase> replacementDestinations = new Dictionary<IOperandInstructionBase, IOperandInstructionBase>();
@@ -334,7 +334,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             return replaced;
         }
 
-        private static IEnumerable<(IRAssign, IOperandInstructionBase)> GetSingleUseAssignments(ICodeComponent codeComponent)
+        private static IEnumerable<(IRAssign, IOperandInstructionBase)> GetSingleUseAssignments(CodeComponent codeComponent)
         {
             List<(IRAssign, IOperandInstructionBase)> singleUseVariables =
                 new List<(IRAssign, IOperandInstructionBase)>();

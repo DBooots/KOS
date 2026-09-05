@@ -15,7 +15,7 @@ namespace kOS.Safe.Compilation.IR
         /// </summary>
         /// <param name="blocks">The interim representation basic blocks for which to emit.</param>
         /// <returns>The sequence of Opcodes representing the code.</returns>
-        public List<Opcode> Emit(List<BasicBlock> blocks)
+        public List<Opcode> Emit(IEnumerable<BasicBlock> blocks)
         {
             List<Opcode> result = new List<Opcode>();
             Dictionary<string, int> jumpLabels = new Dictionary<string, int>();

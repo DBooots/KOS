@@ -4,10 +4,11 @@ using System.Linq;
 
 namespace kOS.Safe.Compilation.IR
 {
-    public class StackTransferPhi : PhiNode<IStackTransferObject>, IStackTransferObject, IOperandInstructionBase
+    public class StackTransferPhi : PhiOperand<IStackTransferObject>, IStackTransferObject, IOperandInstructionBase
     {
         private readonly HashSet<StackTransferPhi> controllers = new HashSet<StackTransferPhi>();
         private readonly HashSet<IRParameter> references = new HashSet<IRParameter>();
+
         public bool AdoptTypeHints { get; set; } = false;
         public IReadOnlyCollection<StackTransferPhi> Controllers => controllers;
         public IReadOnlyCollection<IRParameter> References => references;
@@ -15,7 +16,7 @@ namespace kOS.Safe.Compilation.IR
             => new StackTransferPhi[] { this }.Concat(PossibleValues.Values);
         protected override IEnumerable<IInterimOperand> Operands => GetAllInvolvedPushes().Select(p => p.Value);
 
-        public override bool IsInvariant => IsResolvable && SingleValueIs(ObjIsInvariant, this, null);
+        public override bool IsInvariant => IsResolvable && base.IsInvariant;
         public override Type Type
         {
             get
@@ -40,38 +41,6 @@ namespace kOS.Safe.Compilation.IR
             => obj?.IsInvariant ?? false;
         protected override Type ObjType(IStackTransferObject obj)
             => obj?.Type ?? typeof(Encapsulation.Structure);
-        protected bool SingleValueIs(Func<IStackTransferObject, bool> predicate, StackTransferPhi caller, HashSet<IStackTransferObject> visited)
-        {
-            if (visited == null)
-                visited = new HashSet<IStackTransferObject>();
-            IEnumerable<KeyValuePair<BasicBlock, IStackTransferObject>> reachableValues =
-                PossibleValues.Where(kvp => kvp.Key.IsExecutable);
-            bool singleValue = false;
-            foreach (IStackTransferObject value in reachableValues.Select(kvp => kvp.Value))
-            {
-                if (visited.Add(value))
-                {
-                    if (value == caller)
-                        return false;
-                    if (singleValue)
-                        return false;
-                    bool result;
-                    switch (value)
-                    {
-                        case StackTransferPhi phi:
-                            result = phi.SingleValueIs(predicate, caller, visited);
-                            break;
-                        default:
-                            result = predicate(value);
-                            break;
-                    }
-                    if (!result)
-                        return false;
-                    singleValue = true;
-                }
-            }
-            return singleValue;
-        }
         public override InterimConstantValue Evaluate()
         {
             if (!PossibleValues.Any())
@@ -79,7 +48,7 @@ namespace kOS.Safe.Compilation.IR
             return base.Evaluate();
         }
 
-        protected override InterimConstantValue EvaluateObj(IStackTransferObject obj)
+        protected override InterimConstantValue ObjAsConstant(IStackTransferObject obj)
             => (obj.Value as IEvaluatableToConstant)?.Evaluate();
 
 
@@ -90,10 +59,7 @@ namespace kOS.Safe.Compilation.IR
         }
         protected IEnumerable<IRPushStack> GetAllInvolvedPushes()
         {
-            List<IRPushStack> pushes = new List<IRPushStack>();
-            HashSet<StackTransferPhi> visited = new HashSet<StackTransferPhi>() { this };
-            BuildLists(pushes, visited);
-            return pushes;
+            return GetPossibleValues().Cast<IRPushStack>();
         }
         protected void BuildLists(List<IRPushStack> list, HashSet<StackTransferPhi> visited)
         {
@@ -118,7 +84,7 @@ namespace kOS.Safe.Compilation.IR
             => item is IRPushStack pushStack ? pushStack.Value : throw new NotImplementedException();
 
         public bool IsResolvable => IRParameter.IsSetResolvable(this);
-        public bool IsSelfResolvable => PossibleValues.Where(kvp => kvp.Key.IsExecutable).Distinct().Count() == 1;
+        public bool IsSelfResolvable => GetPossibleValues().Count == 1;
         protected virtual bool ObjIsResolvable(IStackTransferObject obj)
             => obj?.IsResolvable ?? false;
 
@@ -128,7 +94,7 @@ namespace kOS.Safe.Compilation.IR
             {
                 if (!IsResolvable)
                     throw new InvalidOperationException();
-                return PossibleValues.First(kvp => kvp.Key.IsExecutable).Value.Value;
+                return GetPossibleValues().First().Value;
             }
             set
             {

@@ -14,6 +14,13 @@ namespace kOS.Safe.Compilation.Optimization
     [AssemblyWalk(InterfaceType = typeof(IOptimizationPass), StaticRegisterMethod = "RegisterMethod")]
     public class Optimizer
     {
+        public static IReadOnlyCollection<Type> WhiteListedPasses = new HashSet<Type>
+        {
+            typeof(Passes.SCCPWithTypePropagation),
+            typeof(SingleStaticAssignment),
+            typeof(Passes.CallSuffixElimination),
+            typeof(Passes.TernaryOperandConstruction)
+        };
         public static HashSet<Type> PassesToSkip { get; } = new HashSet<Type>();
 
         internal static InterimCPU InterimCPU { get; } = new InterimCPU();
@@ -30,18 +37,6 @@ namespace kOS.Safe.Compilation.Optimization
         /// Gets a value indicating whether built-in names may be clobbered.
         /// </summary>
         public bool AllowClobberBuiltins { get; }
-        /// <summary>
-        /// Gets the collection of Basic Blocks being operated upon.
-        /// </summary>
-        public IEnumerable<BasicBlock> Blocks { get; private set; }
-        /// <summary>
-        /// Gets the collection of extended basic blocks being operated upon.
-        /// </summary>
-        public List<ExtendedBasicBlock> ExtendedBlocks { get; private set; }
-        /// <summary>
-        /// Gets the collection of root blocks.
-        /// </summary>
-        public IEnumerable<BasicBlock> RootBlocks { get; private set; }
         /// <summary>
         /// Gets the IRCodePart object being operated upon.
         /// </summary>
@@ -90,26 +85,15 @@ namespace kOS.Safe.Compilation.Optimization
         public void Optimize(IRCodePart codePart)
         {
             Code = codePart;
-            Blocks = codePart.Blocks;
-            RootBlocks = codePart.RootBlocks;
-
-            List<ExtendedBasicBlock> rootExtendedBlocks = new List<ExtendedBasicBlock>(
-                codePart.RootBlocks.Select(b => ExtendedBasicBlock.CreateExtendedBlockTree(b)));
-            ExtendedBlocks = new List<ExtendedBasicBlock>(
-                rootExtendedBlocks.SelectMany(ExtendedBasicBlock.DumpTree));
 
             foreach (IOptimizationPass pass in optimizationPasses)
             {
                 if (pass.OptimizationLevel > OptimizationLevel)
                     continue;
 
-                if (PassesToSkip.Contains(pass.GetType()))
-                {
-                    if (!(pass is Passes.SCCPWithTypePropagation ||
-                        pass is SingleStaticAssignment ||
-                        pass is Passes.TernaryOperandConstruction))
-                        continue;
-                }
+                if (PassesToSkip.Contains(pass.GetType()) &&
+                    !WhiteListedPasses.Contains(pass.GetType()))
+                    continue;
 
                 SafeHouse.Logger.Log($"Applying optimization pass: {pass.GetType()}.");
                 switch (pass)
@@ -118,17 +102,26 @@ namespace kOS.Safe.Compilation.Optimization
                         codePartpass.ApplyPass(Code);
                         break;
                     case IOptimizationPass<BasicBlock> blockPass:
-                        blockPass.ApplyPass(Blocks);
-                        break;
-                    case IOptimizationPass<ExtendedBasicBlock> extendedBlockPass:
-                        extendedBlockPass.ApplyPass(ExtendedBlocks);
+                        blockPass.ApplyPass(Code.Blocks);
                         break;
                     case IOptimizationPass<IRInstruction> instructionPass:
-                        foreach (BasicBlock block in Blocks)
+                        foreach (BasicBlock block in Code.Blocks)
                             instructionPass.ApplyPass(block.Instructions);
                         break;
-                    case IOptimizationPass<ICodeComponent> codeComponentPass:
+                    case IOptimizationPass<CodeElement> codeUnitPass:
+                        codeUnitPass.ApplyPass(codePart.Elements);
+                        break;
+                    case IOptimizationPass<CodeComponent> codeComponentPass:
                         codeComponentPass.ApplyPass(codePart.Components);
+                        break;
+                    case IOptimizationPass<IRTrigger> triggerPass:
+                        triggerPass.ApplyPass(codePart.Triggers);
+                        break;
+                    case IOptimizationPass<IRFunction> functionPass:
+                        functionPass.ApplyPass(codePart.Functions);
+                        break;
+                    case IOptimizationPass<IInterimFunction> allFunctionPass:
+                        allFunctionPass.ApplyPass(codePart.Functions.Concat(codePart.Components.Where(e => e is IRAnonymousFunction).Cast<IInterimFunction>()));
                         break;
                     default:
                         SafeHouse.Logger.LogWarning($"{pass.GetType()}, implementing IOptimizingPass<T>, uses an unsupported generic parameter.");

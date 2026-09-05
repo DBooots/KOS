@@ -5,7 +5,7 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class BlockOrdering : IOptimizationPass<ICodeComponent>, ILinkedOptimizationPass
+    public class BlockOrdering : IOptimizationPass<CodeComponent>, ILinkedOptimizationPass
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.None;
         public short SortIndex => short.MaxValue;
@@ -20,21 +20,21 @@ namespace kOS.Safe.Compilation.Optimization.Passes
 
         // Optimally arrange blocks, while eliminating non-executable blocks
         // (if the optimization level is Balanced or above).
-        public void ApplyPass(IEnumerable<ICodeComponent> codeComponents)
+        public void ApplyPass(IEnumerable<CodeComponent> codeComponents)
         {
 
             if (Optimizer.OptimizationLevel >= OptimizationLevel.Minimal)
-                foreach (ICodeComponent component in codeComponents)
+                foreach (CodeComponent component in codeComponents)
                     ApplyOrdering(component, ExecutableBlocksPredicate);
             else
-                foreach (ICodeComponent component in codeComponents)
+                foreach (CodeComponent component in codeComponents)
                     ApplyOrdering(component, AllBlocksPredicate);
         }
             
 
         // Optimally arrange blocks assuming that all are executable.
         // This method is publicly available outside the optimization pipeline.
-        public static void ApplyInitialOrdering(ICodeComponent codeComponent)
+        public static void ApplyInitialOrdering(CodeComponent codeComponent)
             => ApplyOrdering(codeComponent, AllBlocksPredicate);
 
         /// <summary>
@@ -42,7 +42,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
         /// </summary>
         /// <param name="codePart">The code part.</param>
         /// <param name="inclusionPredicate">The inclusion predicate (all or executable blocks).</param>
-        private static void ApplyOrdering(ICodeComponent codeComponent, Func<BasicBlock, bool> inclusionPredicate)
+        private static void ApplyOrdering(CodeComponent codeComponent, Func<BasicBlock, bool> inclusionPredicate)
         {
             codeComponent.Blocks = ApplyOrdering(codeComponent.RootBlock, inclusionPredicate);
         }
@@ -103,25 +103,6 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     block.Continuation is BranchContinuation branch &&
                     branch.True == results[i + 1])
                     branch.PreferFalse = true;
-            }
-
-            // The streamlined sequence for the primary code path ends
-            // before the end of the file.
-            // This adds a jump to a nop at the end of the file so that
-            // code flow does not fall through to other blocks.
-            if (metaSequences.Count > 1 &&
-                !(metaSequences[0].Last.Instructions.LastOrDefault() is IRReturn))
-            {
-                JumpContinuation syntheticContinuation = metaSequences[0].Last.Continuation as JumpContinuation;
-                BasicBlock returnBlock = BasicBlock.InsertBlockBetween(metaSequences[0].Last, syntheticContinuation.Target);
-                returnBlock.Add(new IRNoStackInstruction(returnBlock,
-                    new OpcodeNOP()
-                    {
-                        SourceLine = syntheticContinuation.SourceLine,
-                        SourceColumn = syntheticContinuation.SourceColumn
-                    },
-                    true));
-                results.Add(returnBlock);
             }
 
             // This block is to avoid leaving branch instructions to blocks

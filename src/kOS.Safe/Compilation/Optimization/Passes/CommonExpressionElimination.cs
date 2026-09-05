@@ -4,17 +4,17 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class CommonExpressionElimination : IHolisticOptimizationPass
+    public class CommonExpressionElimination : IOptimizationPass<CodeComponent>
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Balanced;
         public short SortIndex => 32100;
 
-        public void ApplyPass(IRCodePart codePart)
+        public void ApplyPass(IEnumerable<CodeComponent> components)
         {
-            foreach (BasicBlock rootBlock in codePart.RootBlocks)
-                EliminateCommonExpressions(rootBlock);
+            foreach (CodeComponent component in components)
+                EliminateCommonExpressions(component.RootBlock);
         }
-        private void EliminateCommonExpressions(BasicBlock rootBlock)
+        private static void EliminateCommonExpressions(BasicBlock rootBlock)
         {
             // Track expressions at the outermost context for
             // this code part unit.
@@ -78,7 +78,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 }
             }
         }
-        private void IdentifyExpressions(BasicBlock block, Dictionary<(IResultingInstruction Expression, IRScope Scope), ExpressionData> expressions)
+        private static void IdentifyExpressions(BasicBlock block, Dictionary<(IResultingInstruction Expression, IRScope Scope), ExpressionData> expressions)
         {
             foreach (IOperandInstructionBase operandInstruction in block.DepthFirstOperandInstructions())
             {
@@ -88,7 +88,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     // Break from the subexpression loop if a
                     // non-invariant call is encountered so as
                     // to not 'optimize' away a call that does something.
-                    if (operand is IRCall call && !call.IsInvariant)
+                    if (operand is IRCall call && (!call.IsInvariant || !call.IsInert))
                         breaking = true;
                     else if (operand is IRParameter parameter && !parameter.IsResolvable)
                         breaking = true;

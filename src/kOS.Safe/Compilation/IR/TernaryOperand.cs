@@ -32,7 +32,7 @@ namespace kOS.Safe.Compilation.IR
             {
                 bool? condition = EvaluateCondition();
                 if (condition == null)
-                    return PhiNode<IInterimOperand>.GetFirstCommonBaseType(TrueValue.Type, FalseValue.Type);
+                    return PhiBase<IInterimOperand>.GetFirstCommonBaseType(TrueValue.Type, FalseValue.Type);
                 if (condition == true)
                     return TrueValue.Type;
                 else

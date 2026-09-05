@@ -58,6 +58,14 @@ namespace kOS.Safe.Compilation.Optimization
             }
             else if (operandInstruction == null)
                 yield break;
+            else if (operandInstruction is Passes.CommonExpressionElimination.CompilerTemporaryVariable temp)
+            {
+                if (temp.Value is IOperandInstructionBase encompassed)
+                    foreach (IOperandInstructionBase op in DepthFirst(encompassed))
+                        yield return op;
+                else
+                    yield break;
+            }
             else
                 throw new NotImplementedException();
             yield return operandInstruction;

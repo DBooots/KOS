@@ -5,13 +5,13 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class FunctionInlining : IHolisticOptimizationPass, ILinkedOptimizationPass
+    public class FunctionInlining : IOptimizationPass<IRFunction>, ILinkedOptimizationPass
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Aggressive;
         public short SortIndex => 2000;
         public Optimizer Optimizer { get; set; }
 
-        public void ApplyPass(IRCodePart codePart)
+        public void ApplyPass(IEnumerable<IRFunction> functions)
         {
             int maxFunctionLength;
             if (Optimizer.OptimizationLevel >= OptimizationLevel.Aggressive)
@@ -19,29 +19,37 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             else
                 maxFunctionLength = 50;
 
-            List<IRCodePart.IRFunction> functionsToInline = new List<IRCodePart.IRFunction>
-                (codePart.Functions.Where(CanInlineFunction));
-            Dictionary<IRCodePart.IRFunction, int> functionLengths = new Dictionary<IRCodePart.IRFunction, int>();
+            List<IRFunction> functionsToInline = new List<IRFunction>
+                (functions.Where(CanInlineFunction));
+            Dictionary<IRFunction, int> functionLengths = new Dictionary<IRFunction, int>();
             
-            foreach (IRCodePart.IRFunction function in functionsToInline)
+            foreach (IRFunction function in functionsToInline)
                 functionLengths[function] = CalculateFunctionLength(function);
             
             functionsToInline.RemoveAll(f => functionLengths[f] > maxFunctionLength);
             functionsToInline.Sort((x, y) => functionLengths[x].CompareTo(functionLengths[y]));
 
-            foreach (IRCodePart.IRFunction function in functionsToInline)
+            foreach (IRFunction function in functionsToInline)
             {
                 InlineFunction(function);
             }
         }
 
-        public static int CalculateFunctionLength(IRCodePart.IRFunction function)
+        public static int CalculateFunctionLength(IInterimFunction function)
         {
-            int length = function.Fragments.Sum(f => BasicBlock.GetOpcodeCount(f.Blocks));
-            return length / function.Fragments.Count;
+            switch (function)
+            {
+                case IRFunction func:
+                    int length = func.Fragments.Sum(fragment => BasicBlock.GetOpcodeCount(fragment.Blocks));
+                    return length / func.Fragments.Count;
+                case IRAnonymousFunction anonFunc:
+                    return BasicBlock.GetOpcodeCount(anonFunc.Blocks);
+                default:
+                    throw new NotImplementedException();
+            }
         }
 
-        private void InlineFunction(IRCodePart.IRFunction function)
+        private void InlineFunction(IRFunction function)
         {
             foreach (IRCall call in function.CallSites.ToArray())
             {
@@ -239,7 +247,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             }
         }
 
-        private static bool CanInlineFunction(IRCodePart.IRFunction function)
+        private static bool CanInlineFunction(IRFunction function)
         {
             if (function.IsRecursive)
                 return false;
@@ -247,7 +255,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 return false;
             return true;
         }
-        public static bool CanInlineFunction(IRCodePart.IRFunction function, IRCall callSite, out bool protectScope)
+        public static bool CanInlineFunction(IRFunction function, IRCall callSite, out bool protectScope)
         {
             protectScope = false;
 

@@ -18,13 +18,13 @@ namespace kOS.Safe.Compilation.IR
         /// </summary>
         /// <param name="code">The code to lower.</param>
         /// <returns>A sequence of <see cref="BasicBlock"/> objects, representing the instructions.</returns>
-        public static List<BasicBlock> Lower(List<Opcode> code, ICodeComponent codeComponent, IRScope parentScope = null)
+        public static List<BasicBlock> Lower(List<Opcode> code, CodeComponent codeComponent, IRScope parentScope = null)
         {
             if (code.Count == 0)
                 return new List<BasicBlock>();
             Dictionary<string, int> labels = ProgramBuilder.MapLabels(code);
             List<BasicBlock> blocks = CreateBlocks(code, codeComponent, labels, parentScope, out HashSet<int> scopePushes, out Dictionary<int, int> scopePops);
-            FillBlocks(code, labels, blocks, out List<(string, string, BasicBlock, bool)> functionsToEnroll, out List<(string, BasicBlock)> closuresToEnroll);
+            FillBlocks(code, labels, blocks, out List<(string, string, BasicBlock, bool)> functionsToEnroll, out List<(string, BasicBlock)> closuresToEnroll, out List<(string, BasicBlock)> anonymousFunctionsToEnroll);
 
             IRScope globalScope = parentScope ?? new IRScope(parentScope, null);
             AssignScopes(GetBlockFromStartIndex(blocks, 0), globalScope, scopePushes, scopePops);
@@ -33,11 +33,17 @@ namespace kOS.Safe.Compilation.IR
                 codeComponent.CodePart.EnrollFunction(identifier, pointer, block.Scope, global);
             foreach ((string identifier, BasicBlock block) in closuresToEnroll)
                 codeComponent.CodePart.EnrollClosure(identifier, block.Scope);
+            foreach ((string identifier, BasicBlock block) in anonymousFunctionsToEnroll)
+            {
+                BasicBlock root = GetBlockFromStartIndex(blocks, code.FindIndex(c => c.Label.Equals(identifier, StringComparison.OrdinalIgnoreCase)));
+                AssignScopes(root, block.Scope, scopePushes, scopePops);
+                ((CodeElement)codeComponent).EnrollAnonymousFunction(identifier, root, block.Scope);
+            }
 
             return blocks;
         }
 
-        private static List<BasicBlock> CreateBlocks(List<Opcode> code, ICodeComponent codeComponent, Dictionary<string, int> labels, IRScope parentScope,
+        private static List<BasicBlock> CreateBlocks(List<Opcode> code, CodeComponent codeComponent, Dictionary<string, int> labels, IRScope parentScope,
             out HashSet<int> scopePushes, out Dictionary<int, int> scopePops)
         {
             List<BasicBlock> blocks = new List<BasicBlock>();
@@ -90,7 +96,7 @@ namespace kOS.Safe.Compilation.IR
             }
 
             BasicBlock rootBlock = GetBlockFromStartIndex(blocks, 0);
-            BasicBlock unifiedReturn = new SyntheticReturnBlock(codeComponent.CodePart) { Scope = globalScope };
+            BasicBlock unifiedReturn = new SyntheticReturnBlock(codeComponent) { Scope = globalScope };
             codeComponent.RootBlock = rootBlock;
             if (codeComponent.TerminalBlock == null)
                 codeComponent.TerminalBlock = unifiedReturn;
@@ -169,12 +175,14 @@ namespace kOS.Safe.Compilation.IR
         }
 
         private static void FillBlocks(List<Opcode> code, Dictionary<string, int> labels, List<BasicBlock> blocks,
-            out List<(string, string, BasicBlock, bool)> functionsToEnroll, out List<(string, BasicBlock)> closuresToEnroll)
+            out List<(string, string, BasicBlock, bool)> functionsToEnroll, out List<(string, BasicBlock)> closuresToEnroll,
+            out List<(string, BasicBlock)> anonymousFunctionsToEnroll)
         {
             Stack<IInterimOperand> stack = new Stack<IInterimOperand>();
             BasicBlock currentBlock = GetBlockFromStartIndex(blocks, 0);
             closuresToEnroll = new List<(string, BasicBlock)>();
             functionsToEnroll = new List<(string, string, BasicBlock, bool)>();
+            anonymousFunctionsToEnroll = new List<(string, BasicBlock)>();
             for (int i = 0; i < code.Count; i++)
             {
                 if (i > currentBlock.EndIndex)
@@ -192,7 +200,7 @@ namespace kOS.Safe.Compilation.IR
                     }
                     currentBlock = GetBlockFromStartIndex(blocks, i);
                 }
-                ParseInstruction(code[i], currentBlock, stack, labels, i, blocks, ref functionsToEnroll, ref closuresToEnroll);
+                ParseInstruction(code[i], currentBlock, stack, labels, i, blocks, ref functionsToEnroll, ref closuresToEnroll, ref anonymousFunctionsToEnroll);
             }
         }
 
@@ -225,7 +233,8 @@ namespace kOS.Safe.Compilation.IR
         }
 
         private static void ParseInstruction(Opcode opcode, BasicBlock currentBlock, Stack<IInterimOperand> stack, Dictionary<string, int> labels, int index, List<BasicBlock> blocks,
-            ref List<(string, string, BasicBlock, bool)> functionsToEnroll, ref List<(string, BasicBlock)> closuresToEnroll)
+            ref List<(string, string, BasicBlock, bool)> functionsToEnroll, ref List<(string, BasicBlock)> closuresToEnroll,
+            ref List<(string, BasicBlock)> anonymousFunctionsToEnroll)
         {
             IInterimOperand PopStack()
                 =>PopFromStack(stack, currentBlock);
@@ -355,6 +364,7 @@ namespace kOS.Safe.Compilation.IR
                         }
                         arguments.Push(stackResult);
                     }
+
                     if (call.Destination == null &&
                         call.DestinationLabel.StartsWith("@LR"))
                     {
@@ -364,10 +374,10 @@ namespace kOS.Safe.Compilation.IR
                     }
                     else
                         instruction = new IRCall(currentBlock, call, argumentsClosed, arguments);
+
                     if (stack.Count > 0 && !((IRCall)instruction).Direct)
-                    {
-                        ((IRCall)instruction).IndirectMethod = PopStack();
-                    }
+                        ((IRCall)instruction).TargetMethod = PopStack();
+
                     stack.Push(instruction);
                     break;
                 case OpcodeReturn opcodeReturn:
@@ -381,10 +391,13 @@ namespace kOS.Safe.Compilation.IR
                         stack.Push(new InterimConstantValue(argument, opcodePush));
                     break;
                 case OpcodePushDelegateRelocateLater delegateRelocateLater:
-                    stack.Push(new IRDelegateRelocateLater(delegateRelocateLater.DestinationLabel, delegateRelocateLater.WithClosure, delegateRelocateLater));
+                    string pointerString = delegateRelocateLater.DestinationLabel;
+                    if (pointerString.StartsWith("@"))
+                        anonymousFunctionsToEnroll.Add((pointerString, currentBlock));
+                    stack.Push(new IRDelegateRelocateLater(pointerString, delegateRelocateLater.WithClosure, delegateRelocateLater, currentBlock.CodePart));
                     break;
                 case OpcodePushRelocateLater relocateLater:
-                    stack.Push(new IRRelocateLater(relocateLater.DestinationLabel, relocateLater));
+                    stack.Push(new IRRelocateLater(relocateLater.DestinationLabel, relocateLater, currentBlock.CodePart));
                     break;
                 case OpcodeAddTrigger _:
                     IInterimOperand pointer = PopStack();

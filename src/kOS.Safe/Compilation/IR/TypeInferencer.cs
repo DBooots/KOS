@@ -43,6 +43,10 @@ namespace kOS.Safe.Compilation.IR
             structureDict.Add("BIND", typeof(KOSDelegate));
             structureDict.Add("ISDEAD", typeof(BooleanValue));
             suffixDictionaries.Add(typeof(KOSDelegate), structureDict);
+            // UserDelegate:
+            suffixDictionaries.Add(typeof(UserDelegate), structureDict);
+            // BuiltInDelegate:
+            suffixDictionaries.Add(typeof(BuiltinDelegate), structureDict);
 
             // ScalarValue:
             structureDict = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
@@ -120,9 +124,6 @@ namespace kOS.Safe.Compilation.IR
             instance.HasSuffix(string.Empty);
 
             // Grab the instanceSuffixes field and peek at its values
-            //var test2 = typeof(Structure).GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            //var test = type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            //FieldInfo instanceSuffixField = type.GetField("instanceSuffixes", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             IDictionary<string, ISuffix> instanceSuffixes = (IDictionary<string, ISuffix>)instanceSuffixesRef.GetValue(instance);
 
             // We'll also grab the globalSuffixes field

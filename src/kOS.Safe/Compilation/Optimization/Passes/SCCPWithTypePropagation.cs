@@ -47,6 +47,11 @@ namespace kOS.Safe.Compilation.Optimization.Passes
         /// </returns>
         public static Dictionary<SSADefinition, HashSet<IOperandInstructionBase>> MapUsesAndPropagateTypes(IRCodePart codePart)
         {
+            // Reset Phis to require executable blocks
+            foreach (BasicBlock block in codePart.Blocks)
+                foreach (PhiNodeSSA phi in block.Phis.Values)
+                    phi.RequireExecutable = true;
+
             // Apply the algorithm starting from each entry block.
             Dictionary<SSADefinition, HashSet<IOperandInstructionBase>> variableUses =
                 new Dictionary<SSADefinition, HashSet<IOperandInstructionBase>>(SSADefinition.ReferenceEqualityComparer);
@@ -151,14 +156,21 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                             // Calls get to be special to address their external read needs.
                             if (inst is IRCall call)
                             {
-                                IRCodePart.IRFunction function = block.CodePart.GetFunction(call);
-                                if (function != null)
+                                IInterimOperand targetFunction = call.TargetMethod;
+                                if (targetFunction is InterimUserFunction userFunction)
                                 {
-                                    HashSet<IInterimVariableReference> variables = block.CodePart.ReachableVariables[call];
-                                    foreach (SSADefinition variable in variables.SelectMany(GetSSADefinitionsFromReferences))
+                                    IInterimFunction function = userFunction.Function;
+                                    if (function != null)
                                     {
-                                        GetOrCreate(variableUses, variable).Add(call);
+                                        HashSet<IInterimVariableReference> variables = block.CodePart.ReachableVariables[call];
+                                        foreach (SSADefinition variable in variables.SelectMany(GetSSADefinitionsFromReferences))
+                                        {
+                                            GetOrCreate(variableUses, variable).Add(call);
+                                        }
                                     }
+                                    if (!(userFunction.VariableReference is InterimVariableReference))
+                                        foreach (SSADefinition variable in GetSSADefinitionsFromReferences(userFunction.VariableReference))
+                                            GetOrCreate(variableUses, variable).Add(call);
                                 }
                             }
                             // Reduce duplication (and the risk of
@@ -234,6 +246,8 @@ namespace kOS.Safe.Compilation.Optimization.Passes
 
         private static IEnumerable<SSADefinition> GetSSADefinitionsFromReferences(IInterimVariableReference reference)
         {
+            if (reference == null)
+                return Enumerable.Empty<SSADefinition>();
             switch (reference)
             {
                 case InterimResolvedReference resolvedReference:
@@ -356,18 +370,41 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             HashSet<SSADefinition> requiredDefinitions = new HashSet<SSADefinition>(constantVariables.Where(def =>
                 ssaUses[def].Any(use =>
                 {
-                    if (use is IRCall call)
+                    IInterimFunction function = null;
+                    switch (use)
                     {
-                        var function = call.Block.CodePart.GetFunction(call);
-                        if (function == null)
-                            return false;
-                        if (function.ExternalReads.Any(var => var.Equals(def.Name, StringComparison.OrdinalIgnoreCase)))
-                            return true;
-                        if (function.ExternalWrites.Any(var => var.Equals(def.Name, StringComparison.OrdinalIgnoreCase)))
-                            return true;
-                        if (function.ExternalUnsets.Any(unset => unset.Name.Equals(def.Name, StringComparison.OrdinalIgnoreCase)))
-                            return true;
+                        case IRCall call:
+                            if (call.Block.CodeComponent.UnresolvedCallSites.Contains(call))
+                                return true;
+                            if (call.TargetMethod is InterimUserFunction userFunc)
+                            {
+                                if (def.Name.Equals(userFunc.VariableReference?.Name))
+                                    return true;
+                                function = userFunc.Function;
+                                if (function == null)
+                                    return true;
+                            }
+                            break;
+                        case IRSuffixGet suffixGet:
+                            if (suffixGet.Suffix.Equals("call", StringComparison.OrdinalIgnoreCase))
+                            {
+                                if (suffixGet.Block.CodeComponent.UnresolvedCallSites.Contains(suffixGet))
+                                    return true;
+                                function = suffixGet.Block.CodePart.GetFunction((string)((IRDelegateRelocateLater)suffixGet.Object).Value);
+                                if (function == null)
+                                    return true;
+                            }
+                            break;
                     }
+                    if (function == null)
+                        return false;
+                    if (function.ExternalReads.Any(var => var.Equals(def.Name, StringComparison.OrdinalIgnoreCase)))
+                        return true;
+                    if (function.ExternalWrites.Any(var => var.Equals(def.Name, StringComparison.OrdinalIgnoreCase)))
+                        return true;
+                    if (function.ExternalUnsets.Any(unset => unset.Name.Equals(def.Name, StringComparison.OrdinalIgnoreCase)))
+                        return true;
+
                     return false;
                 })), SSADefinition.ReferenceEqualityComparer);
 

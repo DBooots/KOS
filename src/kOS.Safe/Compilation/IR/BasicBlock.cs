@@ -23,12 +23,23 @@ namespace kOS.Safe.Compilation.IR
         private readonly string nonSequentialLabel = null;
         private IRScope scope;
         private BlockContinuation continuation;
+        private CodeComponent codeComponent;
 
         public static void ResetNextID()
             => nextID = 0;
 
         public IRCodePart CodePart { get; }
-        public ICodeComponent CodeComponent { get; private set; }
+        public CodeComponent CodeComponent
+        {
+            get => codeComponent;
+            protected internal set
+            {
+                foreach (IRCall call in Instructions.DepthFirstInstructions().Where(inst => inst is IRCall).Cast<IRCall>())
+                    if (codeComponent.UnresolvedCallSites.Remove(call))
+                        value.UnresolvedCallSites.Add(call);
+                codeComponent = value;
+            }
+        }
         /// <summary>
         /// Gets or sets a value indicating whether this block is executable (reachable).
         /// </summary>
@@ -94,8 +105,8 @@ namespace kOS.Safe.Compilation.IR
         /// <remarks>
         /// This data is populated during <see cref="SingleStaticAssignment.FinalizeSSA(IRCodePart)"/>.
         /// </remarks>
-        public Dictionary<(string Name, IRScope Scope), PhiNodeSSA> Phis { get; } =
-            new Dictionary<(string Name, IRScope Scope), PhiNodeSSA>();
+        public Dictionary<SingleStaticAssignment.ScopeSlot, PhiNodeSSA> Phis { get; } =
+            new Dictionary<SingleStaticAssignment.ScopeSlot, PhiNodeSSA>();
         /// <summary>
         /// Gets the set of incoming SSA variables that this block
         /// receives, including the results of any phi functions.
@@ -103,7 +114,7 @@ namespace kOS.Safe.Compilation.IR
         /// <remarks>
         /// This data is populated during <see cref="SingleStaticAssignment.FinalizeSSA(IRCodePart)"/>.
         /// </remarks>
-        public Dictionary<(string Name, IRScope Scope), SSADefinition> IncomingVariableDefinitions { get; internal set; }
+        public Dictionary<SingleStaticAssignment.ScopeSlot, SSADefinition> IncomingVariableDefinitions { get; internal set; }
         /// <summary>
         /// Gets the state of the incoming stack.
         /// </summary>
@@ -119,7 +130,8 @@ namespace kOS.Safe.Compilation.IR
         /// <remarks>
         /// This data is populated during <see cref="SingleStaticAssignment.FinalizeSSA(IRCodePart)"/>.
         /// </remarks>
-        public HashSet<(string, IRScope)> TriggerPropagationBlacklist { get; } = new HashSet<(string, IRScope)>();
+        public HashSet<SingleStaticAssignment.ScopeSlot> TriggerPropagationBlacklist { get; } =
+            new HashSet<SingleStaticAssignment.ScopeSlot>();
         /// <summary>
         /// Gets the set of variables that are blacklisted against
         /// setting definitive values due to their being unset in active
@@ -128,7 +140,8 @@ namespace kOS.Safe.Compilation.IR
         /// <remarks>
         /// This data is populated during <see cref="SingleStaticAssignment.FinalizeSSA(IRCodePart)"/>.
         /// </remarks>
-        public Dictionary<(string, IRScope), IRUnset> TriggerUnsetBlacklist { get; } = new Dictionary<(string, IRScope), IRUnset>();
+        public Dictionary<SingleStaticAssignment.ScopeSlot, IRUnset> TriggerUnsetBlacklist { get; } =
+            new Dictionary<SingleStaticAssignment.ScopeSlot, IRUnset>();
         /// <summary>
         /// Gets the instruction label with which to start the block.
         /// The special prefix "@BB#" will be overwritten during linking.
@@ -179,13 +192,8 @@ namespace kOS.Safe.Compilation.IR
         /// </summary>
         public IReadOnlyCollection<BasicBlock> PostDominates => postDominates;
         /// <summary>
-        /// Gets or sets the Extended Basic Block of which this block
-        /// is a member.
-        /// </summary>
-        public ExtendedBasicBlock ExtendedBlock { get; set; }
-        /// <summary>
-        /// Gets or sets the <see cref="IRJump"/> instruction that this
-        /// block will terminate with if it does not branch to another.
+        /// Gets or sets the <see cref="BlockContinuation"/>
+        /// instruction that this block will terminate with
         /// </summary>
         public virtual BlockContinuation Continuation
         {
@@ -222,7 +230,7 @@ namespace kOS.Safe.Compilation.IR
         /// <param name="startIndex">The starting index in the original sequence of <see cref="Opcode"/>s.</param>
         /// <param name="endIndex">The ending index in the original sequence of <see cref="Opcode"/>s.</param>
         /// <param name="nonSequentialLabel">A non sequential label, if present.</param>
-        public BasicBlock(ICodeComponent codeComponent, int startIndex, int endIndex, string nonSequentialLabel = null)
+        public BasicBlock(CodeComponent codeComponent, int startIndex, int endIndex, string nonSequentialLabel = null)
         {
             CodeComponent = codeComponent;
             CodePart = codeComponent.CodePart;
@@ -288,7 +296,7 @@ namespace kOS.Safe.Compilation.IR
                 if (oldSuccessor.Predecessors.Count == 0)
                     oldSuccessor.Dominator = null;
             }
-            foreach (ICodeComponent component in new[] { this }.Concat(added.Concat(removed)).Select(b => b.CodeComponent).Distinct())
+            foreach (CodeComponent component in new[] { this }.Concat(added.Concat(removed)).Select(b => b.CodeComponent).Distinct())
             {
                 component.RootBlock.EstablishDominance();
                 component.RootBlock.EstablishPostDominance();
@@ -472,7 +480,7 @@ namespace kOS.Safe.Compilation.IR
             get => base.Continuation;
             set => throw new InvalidOperationException();
         }
-        public SyntheticReturnBlock(IRCodePart codePart) : base(codePart, -1, -1, syntheticReturnLabel)
+        public SyntheticReturnBlock(CodeComponent codeComponent) : base(codeComponent, -1, -1, syntheticReturnLabel)
         {
         }
         public override string ToString()

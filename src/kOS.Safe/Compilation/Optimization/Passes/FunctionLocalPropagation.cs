@@ -5,19 +5,19 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class FunctionLocalPropagation : IHolisticOptimizationPass
+    public class FunctionLocalPropagation : IOptimizationPass<IRFunction>
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Aggressive;
 
         public short SortIndex => 21;
 
-        public void ApplyPass(IRCodePart codePart)
+        public void ApplyPass(IEnumerable<IRFunction> functions)
         {
-            foreach (IRCodePart.IRFunction function in codePart.Functions.Where(f => !f.IsGlobal && f.CallSites.Count > 0))
+            foreach (IRFunction function in functions.Where(f => !f.IsGlobal && f.CallSites.Count > 0))
                 ApplyPass(function);
         }
 
-        public static void ApplyPass(IRCodePart.IRFunction function)
+        public static void ApplyPass(IRFunction function)
         {
             Dictionary<IRInstruction, HashSet<IInterimVariableReference>> reachableVariables = function.CodePart.ReachableVariables;
             
@@ -41,7 +41,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     continue;
 
                 IInterimVariableReference resolvedReference = callSiteReferences.First();
-                foreach (IRCodePart.IRFunction.IRFunctionFragment fragment in function.Fragments)
+                foreach (IRFunctionFragment fragment in function.Fragments)
                 {
                     foreach (BasicBlock block in fragment.Blocks)
                     {

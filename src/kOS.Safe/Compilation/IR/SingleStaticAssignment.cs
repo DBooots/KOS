@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using kOS.Safe.Compilation.Optimization;
-using static kOS.Safe.Compilation.IR.IRCodePart;
 
 namespace kOS.Safe.Compilation.IR
 {
@@ -24,140 +23,260 @@ namespace kOS.Safe.Compilation.IR
         /// </summary>
         public static void FinalizeSSA(IRCodePart codePart, bool stackAdoptsTypeHints)
         {
-            Dictionary<IRFunction, HashSet<IRFunction>> funcCallTrees = new Dictionary<IRFunction, HashSet<IRFunction>>();
-            Dictionary<IRFunction, HashSet<IRFunction>> callers = new Dictionary<IRFunction, HashSet<IRFunction>>();
-            Queue<IRFunction> functionQueue = new Queue<IRFunction>(codePart.Functions.OrderBy(f => f.FunctionCalls.Count));
-            Dictionary<IRFunction, Dictionary<(string, IRScope), SSADefinition>> externalSets = new Dictionary<IRFunction, Dictionary<(string, IRScope), SSADefinition>>();
+            Dictionary<IClosureVariableUser, HashSet<IInterimFunction>> funcCallTrees = new Dictionary<IClosureVariableUser, HashSet<IInterimFunction>>();
+            Dictionary<IClosureVariableUser, HashSet<IClosureVariableUser>> callers = new Dictionary<IClosureVariableUser, HashSet<IClosureVariableUser>>();
+            Queue<IClosureVariableUser> functionQueue = new Queue<IClosureVariableUser>();
+            Dictionary<IClosureVariableUser, Dictionary<ScopeSlot, SSADefinition>> externalSets = new Dictionary<IClosureVariableUser, Dictionary<ScopeSlot, SSADefinition>>();
 
             // Establish the call trees and ensure that all propagated effects are current.
+            foreach (CodeElement element in codePart.Elements)
+                foreach (IRAnonymousFunction anonFunc in element.AnonymousFunctions)
+                    functionQueue.Enqueue(anonFunc);
+            foreach (IRFunction function in codePart.Functions.OrderBy(f=>f.FunctionCalls.Count))
+                functionQueue.Enqueue(function);
+            foreach (IRTrigger trigger in codePart.Triggers)
+                functionQueue.Enqueue(trigger);
+
             while (functionQueue.Count > 0)
             {
-                IRFunction function = functionQueue.Dequeue();
-                HashSet<IRFunction> functionCalls = new HashSet<IRFunction>(function.FunctionCalls);
-                
-                foreach (BasicBlock root in function.RootBlocks)
-                    BuildPhis(root, codePart, function, stackAdoptsTypeHints);
+                IClosureVariableUser closure = functionQueue.Dequeue();
+                HashSet<IInterimFunction> functionCalls = new HashSet<IInterimFunction>(closure.FunctionCalls);
 
-                FlattenCallTree(function);
+                switch (closure)
+                {
+                    case IRFunction func:
+                        foreach (BasicBlock root in func.RootBlocks)
+                            BuildPhis(root, codePart, closure, stackAdoptsTypeHints);
+                        break;
+                    case CodeComponent component:
+                        BuildPhis(component.RootBlock, codePart, component, stackAdoptsTypeHints);
+                        break;
+                    default:
+                        throw new NotImplementedException();
+                }
+
+                IRCodePart.FlattenCallTree(closure);
 
                 bool same = true;
                 // Require that the call tree reaches a stable point.
-                if (funcCallTrees.TryGetValue(function, out HashSet<IRFunction> cachedCalls))
+                if (funcCallTrees.TryGetValue(closure, out HashSet<IInterimFunction> cachedCalls))
                 {
                     bool callsEqual = cachedCalls.SetEquals(functionCalls);
                     same &= callsEqual;
                     if (!callsEqual)
-                        funcCallTrees[function].UnionWith(function.FunctionCalls);
+                        funcCallTrees[closure].UnionWith(closure.FunctionCalls);
                 }
                 else
                 {
-                    funcCallTrees.Add(function, new HashSet<IRFunction>(function.FunctionCalls));
+                    funcCallTrees.Add(closure, new HashSet<IInterimFunction>(closure.FunctionCalls));
                     same = false;
                 }
                 
-                // Also require that the function's terminal block IncomingVariables is unchanged.
+                // Also require that the closure's terminal block IncomingVariables is unchanged.
                 // We'll use that the propagate ExternalSet SSA definitions at call sites.
-                bool setsEqual = externalSets.TryGetValue(function, out Dictionary<(string, IRScope), SSADefinition> cachedSetDefinitions) &&
-                    cachedSetDefinitions.ContentsEqual((function as ICodeComponent).TerminalBlock.IncomingVariableDefinitions);
+                bool setsEqual = externalSets.TryGetValue(closure, out Dictionary<ScopeSlot, SSADefinition> cachedSetDefinitions) &&
+                    cachedSetDefinitions.ContentsEqual(closure.TerminalBlock.IncomingVariableDefinitions);
                 same &= setsEqual;
                 if (!setsEqual)
-                    externalSets[function] = new Dictionary<(string, IRScope), SSADefinition>(function.TerminalBlock.IncomingVariableDefinitions);
+                    externalSets[closure] = new Dictionary<ScopeSlot, SSADefinition>(closure.TerminalBlock.IncomingVariableDefinitions);
 
                 if (!same)
                 {
-                    foreach (IRFunction callee in function.FunctionCalls)
+                    foreach (IInterimFunction callee in closure.FunctionCalls)
                     {
-                        if (callers.TryGetValue(callee, out HashSet<IRFunction> callerSet))
-                            callerSet.Add(function);
+                        if (callers.TryGetValue(callee, out HashSet<IClosureVariableUser> callerSet))
+                            callerSet.Add(closure);
                         else
-                            callers.Add(callee, new HashSet<IRFunction>() { function });
+                            callers.Add(callee, new HashSet<IClosureVariableUser>() { closure });
                     }
-                    if (callers.ContainsKey(function))
+                    if (callers.ContainsKey(closure))
                     {
-                        foreach (IRFunction caller in callers[function])
+                        foreach (IClosureVariableUser caller in callers[closure])
                         {
                             functionQueue.Enqueue(caller);
                         }
                     }
                 }
             }
-            // At this point, all functions have reached a stable point.
-
-            // Triggers may create triggers, but don't call them in the same
-            // way that functions can call functions. A single pass is sufficient.
-            foreach (IRTrigger trigger in codePart.Triggers)
-            {
-                BuildPhis(trigger.RootBlock, codePart, trigger, stackAdoptsTypeHints);
-                FlattenCallTree(trigger);
-            }
+            // At this point, all functions and triggers have reached a stable point.
 
             // Now the main code can be SSA'd.
-            if (codePart.MainCode.Count > 0)
-                BuildPhis(codePart.MainCode[0], codePart, null, stackAdoptsTypeHints);
+            if (codePart.MainCode.RootBlock != null)
+            {
+                BuildPhis(codePart.MainCode.RootBlock, codePart, codePart.MainCode, stackAdoptsTypeHints);
+            }
 
             // Then apply the SSA definitions to all the variable push operations.
-            // Functions are done iteratively to propagate the ExternalReads property
+            // Functions and triggers are done iteratively to propagate the ExternalReads property
             // up the call chain correctly.
+            foreach (CodeElement element in codePart.Elements)
+                foreach (IRAnonymousFunction anonFunc in element.AnonymousFunctions)
+                    functionQueue.Enqueue(anonFunc);
             foreach (IRFunction function in codePart.Functions.OrderBy(f => f.FunctionCalls.Count))
                 functionQueue.Enqueue(function);
+            foreach (IRTrigger trigger in codePart.Triggers)
+                functionQueue.Enqueue(trigger);
+
             while (functionQueue.Count > 0)
             {
-                IRFunction function = functionQueue.Dequeue();
+                IClosureVariableUser function = functionQueue.Dequeue();
                 HashSet<string> externalReads = new HashSet<string>(function.ExternalReads);
-                foreach (BasicBlock block in function.InitializationCode)
-                    ApplyUses(block, codePart, function);
-                foreach (IRFunction.IRFunctionFragment fragment in function.Fragments)
-                    foreach (BasicBlock block in fragment.Blocks)
-                        ApplyUses(block, codePart, function);
-
+                switch (function)
+                {
+                    case IRFunction func:
+                        // This one might need changing, but initialization code
+                        // shouldn't include anonoymous functions.
+                        foreach (BasicBlock block in func.InitializationCode.AllBlocks)
+                            ApplyUses(block, codePart, function);
+                        foreach (IRFunctionFragment fragment in func.Fragments)
+                            foreach (BasicBlock block in fragment.Blocks)
+                                ApplyUses(block, codePart, function);
+                        break;
+                    case CodeComponent component:
+                        foreach (BasicBlock block in component.Blocks)
+                            ApplyUses(block, codePart, component);
+                        break;
+                    default:
+                        throw new NotImplementedException();
+                }
+                
                 if (callers.ContainsKey(function) &&
                     !externalReads.SetEquals(function.ExternalReads))
                 {
-                    foreach (IRFunction caller in callers[function])
+                    foreach (IClosureVariableUser caller in callers[function])
                         functionQueue.Enqueue(caller);
                 }
             }
-            foreach (IRTrigger trigger in codePart.Triggers)
-            {
-                foreach (BasicBlock block in trigger.Blocks)
-                    ApplyUses(block, codePart, trigger);
-            }
-            foreach (BasicBlock block in codePart.MainCode)
+            foreach (BasicBlock block in codePart.MainCode.AllBlocks)
                 ApplyUses(block, codePart, null);
         }
 
-        private static Dictionary<(string VariableName, IRScope Scope), SSADefinition> AnalyzeBlock(BasicBlock block, IRCodePart codePart, IClosureVariableUser funcOrTrigger)
+        private static IInterimFunction ResolveFunctionReference(IInterimOperand sourceDelegate, IRCodePart codePart, IRScope scope, SSAContext context)
         {
-            Dictionary<(string Name, IRScope Scope), SSADefinition> variables =
-                new Dictionary<(string, IRScope), SSADefinition>();
+            sourceDelegate = DereferenceOperand(sourceDelegate, scope, context);
+            if (sourceDelegate is IRDelegateRelocateLater irDelegate)
+                return codePart.GetFunction((string)irDelegate.Value);
+            return null;
+        }
 
-            foreach (KeyValuePair<(string, IRScope), SSADefinition> varIn in block.IncomingVariableDefinitions)
+        private static IInterimOperand DereferenceOperand(IInterimOperand operand, IRScope scope, SSAContext context)
+        {
+            while (operand is IInterimVariableReference ||
+                operand is IRParameter)
+            {
+                if (operand is IRParameter param)
+                {
+                    if (param.IsResolvable)
+                        operand = param.StackTransferObject.Value;
+                    else
+                        break;
+                }
+                else if (operand is IInterimVariableReference reference)
+                {
+                    if (!(operand is InterimResolvedReference))
+                        operand = AttemptResolveReference(reference, scope, context, out bool _);
+                    if (operand is InterimResolvedReference resolvedReference &&
+                        resolvedReference.Reference is SSASetDefinition setDefinition)
+                        operand = setDefinition.DefinedAt.Value;
+                    else
+                        break;
+                }
+            }
+            return operand;
+        }
+
+        private static Dictionary<ScopeSlot, SSADefinition> AnalyzeBlock(BasicBlock block, IRCodePart codePart, IClosureVariableUser funcOrTrigger)
+        {
+            Dictionary<ScopeSlot, SSADefinition> variables =
+                new Dictionary<ScopeSlot, SSADefinition>();
+
+            SSAContext context = new SSAContext(variables, block.TriggerPropagationBlacklist, block.TriggerUnsetBlacklist);
+
+            foreach (KeyValuePair<ScopeSlot, SSADefinition> varIn in block.IncomingVariableDefinitions)
                 variables.Add(varIn.Key, varIn.Value);
 
-            List<IRInstruction> instructions = block.Instructions;
-            for (int i = 0; i < instructions.Count; i++)
+            foreach (IOperandInstructionBase instruction in block.DepthFirstOperandInstructions())
             {
-                IRInstruction instruction = instructions[i];
-
-                foreach (IRCall call in instruction.DepthFirst().Where(inst => inst is IRCall).Cast<IRCall>())
+                if (instruction is IRCall call && call.Function != null)
                 {
-                    ProcessCall(call, codePart, variables, block.TriggerPropagationBlacklist, block.TriggerUnsetBlacklist, funcOrTrigger, false);
-                    IRFunction function = codePart.GetFunction(call);
-                    if (function != null)
+                    if (call.Direct)
                     {
-                        funcOrTrigger?.FunctionCalls.Add(codePart.GetFunction(call));
-                        function.CallSites.Add(call);
+                        // Eligible direct targets are:
+                        //  A built-in function of that name
+                        //  A user function of that name
+                        //  A variable of that name that contains a delegate
+                        if (Optimizer.FunctionManager.Exists(call.Function.Replace("()", "")))
+                            call.TargetMethod = new InterimBuiltInFunction(call.Function, call);
+                        else
+                        {
+                            if (call.Function.EndsWith("*"))
+                            {
+                                IInterimFunction target = codePart.GetFunction(call.Function);
+                                call.TargetMethod = new InterimUserFunction(target, call);
+                            }
+                            else
+                            {
+                                string target = call.Function;
+                                if (!target.StartsWith("$"))
+                                    target = "$" + target;
+                                IInterimVariableReference variableReference = new InterimVariableReference(target, call);
+                                variableReference = AttemptResolveReference(variableReference, block.Scope, context, out bool exceeded);
+
+                                // Check if variableReference.Type is derived from BuiltInReference and then scoop the original.
+                                if (typeof(Encapsulation.BuiltinDelegate).IsAssignableFrom(variableReference.Type) &&
+                                    variableReference is InterimResolvedReference resolvedReference &&
+                                    resolvedReference.Reference is SSASetDefinition setDefinition)
+                                {
+                                    call.TargetMethod = new InterimBuiltInFunction((string)((InterimConstantValue)((IRCall)setDefinition.DefinedAt.Value).Arguments.First()).Value, call);
+                                }
+                                else
+                                {
+                                    IInterimFunction targetFunc = ResolveFunctionReference(variableReference, codePart, block.Scope, context);
+                                    call.TargetMethod = new InterimUserFunction(variableReference, targetFunc, call);
+                                }
+                            }
+                        }
                     }
+                    else
+                    {
+                        // Eligible indirect targets are:
+                        //  [C#] Delegate - should not be used in practice anymore
+                        //  KOSDelegate
+                        //  ISuffixResult (cannot be stored to a variable)
+
+                        // Indirect values must already be stored.
+
+                    }
+
+                    if (call.TargetMethod is InterimUserFunction userFunc)
+                    {
+                        IInterimFunction function = userFunc.Function;
+                        ProcessCall(call, function, codePart, context, funcOrTrigger, false);
+                        if (function != null)
+                            funcOrTrigger?.FunctionCalls.Add(function);
+                        // No need to set UnresolvedCallSites here since
+                        // call.TargetMethod handles that more thoroughly.
+                    }
+                }
+                else if (instruction is IRSuffixGet suffixGet &&
+                    suffixGet.Suffix.Equals("call", StringComparison.OrdinalIgnoreCase))
+                {
+                    IInterimFunction function = ResolveFunctionReference(suffixGet.Object, codePart, block.Scope, context);
+                    ProcessCall(suffixGet, function, codePart, context, funcOrTrigger, false);
+                    if (function != null)
+                        funcOrTrigger?.FunctionCalls.Add(function);
+                    else
+                        funcOrTrigger?.UnresolvedCallSites.Add((IRInstruction)instruction);
                 }
 
                 switch (instruction)
                 {
                     case IRAssign assignment:
-                        if (ProcessAssignment(assignment, codePart, variables, block.TriggerPropagationBlacklist, block.TriggerUnsetBlacklist, false))
+                        if (ProcessAssignment(assignment, codePart, context, false))
                             funcOrTrigger?.ExternalWrites.Add(assignment.Target.Name);
                         break;
                     case IRUnset unset:
-                        ProcessUnset(unset, variables, funcOrTrigger?.ExternalUnsets, false);
+                        ProcessUnset(unset, context.Variables, funcOrTrigger?.ExternalUnsets, false);
                         break;
                     case IRUnaryConsumer unaryConsumer:
                         // On encountering a trigger, blacklist any variables that are written in the trigger or body.
@@ -166,7 +285,7 @@ namespace kOS.Safe.Compilation.IR
                         {
                             string pointer = (string)((InterimConstantValue)unaryConsumer.Operand).Value;
                             IRTrigger trigger = codePart.GetTrigger(pointer);
-                            ProcessTrigger(trigger, variables, block.TriggerPropagationBlacklist, block.TriggerUnsetBlacklist, false);
+                            ProcessTrigger(trigger, context, false);
                             funcOrTrigger?.TriggersCreated.Add(trigger);
                         }
                         break;
@@ -174,31 +293,34 @@ namespace kOS.Safe.Compilation.IR
                 }
             }
 
-            return variables;
+            return context.Variables;
         }
 
-        private static bool ProcessAssignment(IRAssign assignment, IRCodePart codePart, Dictionary<(string, IRScope), SSADefinition> variables, HashSet<(string, IRScope)> readBlacklist, Dictionary<(string, IRScope), IRUnset> writeBlacklist, bool writeReplaceChain)
+        private static bool ProcessAssignment(IRAssign assignment, IRCodePart codePart, SSAContext context, bool writeReplaceChain)
         {
             IRScope startingScope = assignment.Block.Scope;
             SSASetDefinition definition = assignment.Target;
+            Dictionary<ScopeSlot, IRUnset> writeBlacklist = context.WriteBlacklist;
+            Dictionary<ScopeSlot, SSADefinition> variables = context.Variables;
+
             switch (assignment.Scope)
             {
                 case IRAssign.StoreScope.Local:
-                    if (writeBlacklist.TryGetValue((definition.Name, startingScope), out IRUnset unset))
-                        ReplaceDefinition(variables, (definition.Name, startingScope), definition.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
+                    if (writeBlacklist.TryGetValue(new ScopeSlot(definition.Name, startingScope), out IRUnset unset))
+                        ReplaceDefinition(variables, new ScopeSlot(definition.Name, startingScope), definition.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
                     else
-                        ReplaceDefinition(variables, (definition.Name, startingScope), definition, writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(definition.Name, startingScope), definition, writeReplaceChain);
                     startingScope.Assignments.Add(assignment);
                     assignment.IsInert = true;
                     // IRFunction.IsGlobal initiates as false, so there's no need to |= false.
                     break;
                 case IRAssign.StoreScope.Global:
-                    if (writeBlacklist.TryGetValue((definition.Name, startingScope), out IRUnset globalUnset))
-                        ReplaceDefinition(variables, (definition.Name, startingScope.GetGlobalScope()), SSAPotentialDefinition.PotentiallySet(definition, globalUnset, writeReplaceChain), writeReplaceChain);
+                    if (writeBlacklist.TryGetValue(new ScopeSlot(definition.Name, startingScope), out IRUnset globalUnset))
+                        ReplaceDefinition(variables, new ScopeSlot(definition.Name, startingScope.GetGlobalScope()), SSAPotentialDefinition.PotentiallySet(definition, globalUnset, writeReplaceChain), writeReplaceChain);
                     else
-                        ReplaceDefinition(variables, (definition.Name, startingScope.GetGlobalScope()), definition, writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(definition.Name, startingScope.GetGlobalScope()), definition, writeReplaceChain);
                     startingScope.GetGlobalScope().Assignments.Add(assignment);
-                    SetFunctionToGlobal(assignment, codePart, variables, readBlacklist, writeBlacklist, writeReplaceChain);
+                    SetFunctionToGlobal(assignment, codePart, context, writeReplaceChain);
                     assignment.IsInert = false;
                     break;
                 default:
@@ -207,7 +329,7 @@ namespace kOS.Safe.Compilation.IR
                         // This isn't necessarily true in the case of nested function definitions.
                         // But true function definitions are definitively set as local or global.
                         // This only applies to a nested lock, which deserves to lose out on optimizations.
-                        SetFunctionToGlobal(assignment, codePart, variables, readBlacklist, writeBlacklist, writeReplaceChain);
+                        SetFunctionToGlobal(assignment, codePart, context, writeReplaceChain);
                         assignment.IsInert = false;
                         return true;
                     }
@@ -217,7 +339,7 @@ namespace kOS.Safe.Compilation.IR
             }
             return false;
         }
-        private static bool ApplyDefinitionToName(SSASetDefinition definition, IRScope scope, Dictionary<(string VariableName, IRScope Scope), SSADefinition> variables, bool writeReplaceChain)
+        private static bool ApplyDefinitionToName(SSASetDefinition definition, IRScope scope, Dictionary<ScopeSlot, SSADefinition> variables, bool writeReplaceChain)
         {
             string name = definition.Name;
             bool potential = false;
@@ -226,16 +348,16 @@ namespace kOS.Safe.Compilation.IR
             {
                 // If there is no variable slot at this scope for this name, escalate one scope level.
                 // Similarly if there is a slot but it's unset.
-                if (!variables.TryGetValue((definition.Name, scope), out SSADefinition slotValue) ||
+                if (!variables.TryGetValue(new ScopeSlot(definition.Name, scope), out SSADefinition slotValue) ||
                     slotValue.State == SSADefinition.SetState.Unset)
                 {
                     // If this is already the global scope, store the definition and break.
                     if (scope.IsGlobalScope)
                     {
                         if (potential)
-                            ReplaceDefinition(variables, (name, scope), SSAPotentialDefinition.PotentiallySet(definition, (IRUnset)lastPotential.AssignedAt, writeReplaceChain), writeReplaceChain);
+                            ReplaceDefinition(variables, new ScopeSlot(name, scope), SSAPotentialDefinition.PotentiallySet(definition, (IRUnset)lastPotential.AssignedAt, writeReplaceChain), writeReplaceChain);
                         else
-                            ReplaceDefinition(variables, (name, scope), definition, writeReplaceChain);
+                            ReplaceDefinition(variables, new ScopeSlot(name, scope), definition, writeReplaceChain);
                         scope.Assignments.Add(definition.DefinedAt);
                         // Since the SSA algorithm for a function won't know
                         // of any slots filled between the function's top and the
@@ -253,9 +375,9 @@ namespace kOS.Safe.Compilation.IR
                 if (slotValue.State == SSADefinition.SetState.PotentiallyUnset)
                 {
                     if (potential)
-                        ReplaceDefinition(variables, (name, scope), slotValue.PotentiallyOverwrite(definition, writeReplaceChain), writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(name, scope), slotValue.PotentiallyOverwrite(definition, writeReplaceChain), writeReplaceChain);
                     else
-                        ReplaceDefinition(variables, (name, scope), definition.PotentiallyUnset((IRUnset)slotValue.AssignedAt, writeReplaceChain), writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(name, scope), definition.PotentiallyUnset((IRUnset)slotValue.AssignedAt, writeReplaceChain), writeReplaceChain);
                     scope.Assignments.Add(definition.DefinedAt);
                     potential = true;
                     lastPotential = slotValue;
@@ -264,9 +386,9 @@ namespace kOS.Safe.Compilation.IR
                 {
                     // If the higher value was only potentially set, anything further becomes potentially overwritten.
                     if (potential)
-                        ReplaceDefinition(variables, (name, scope), slotValue.PotentiallyOverwrite(definition, writeReplaceChain), writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(name, scope), slotValue.PotentiallyOverwrite(definition, writeReplaceChain), writeReplaceChain);
                     else
-                        ReplaceDefinition(variables, (name, scope), definition, writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(name, scope), definition, writeReplaceChain);
                     scope.Assignments.Add(definition.DefinedAt);
                     break;
                 }
@@ -274,7 +396,7 @@ namespace kOS.Safe.Compilation.IR
             }
             return scope.IsGlobalScope;
         }
-        private static void ReplaceDefinition(Dictionary<(string, IRScope), SSADefinition> variables, (string, IRScope) key, SSADefinition replacement, bool writeReplaceChain)
+        private static void ReplaceDefinition(Dictionary<ScopeSlot, SSADefinition> variables, ScopeSlot key, SSADefinition replacement, bool writeReplaceChain)
         {
             if (writeReplaceChain &&
                 variables.TryGetValue(key, out SSADefinition original))
@@ -285,23 +407,29 @@ namespace kOS.Safe.Compilation.IR
             variables[key] = replacement;
         }
 
-        private static void SetFunctionToGlobal(IRAssign assignment, IRCodePart codePart, Dictionary<(string VariableName, IRScope Scope),
-            SSADefinition> variables, HashSet<(string, IRScope)> readBlacklist, Dictionary<(string, IRScope), IRUnset> writeBlacklist, bool writeReplaceChain)
+        private static void SetFunctionToGlobal(IRAssign assignment, IRCodePart codePart, SSAContext context, bool writeReplaceChain)
         {
-            if (codePart == null ||
-                !(assignment.Value is IRRelocateLater funcOrTrigger))
-                return;
-            IRFunction function = codePart.GetFunction(((string)funcOrTrigger.Value).Split('-').First());
-            if (function == null)
-                return;
-            function.IsGlobal = true;
+            if (assignment.Value is IRRelocateLater funcOrTrigger)
+            {
+                IInterimFunction function =
+                    // Regular functions or triggers have some extra identifiers
+                    codePart.GetFunction(((string)funcOrTrigger.Value).Split('-').First()) ??
+                    // Anonymous functions just use their name
+                    codePart.GetFunction((string)funcOrTrigger.Value);
 
-            // A global function could be added to a trigger in external code.
-            // Treat it as a trigger body itself.
-            ProcessTrigger(function, variables, readBlacklist, writeBlacklist, writeReplaceChain);
+                if (function == null)
+                    return;
+
+                if (function is IRFunction func)
+                    func.IsGlobal = true;
+
+                // A global function could be added to a trigger in external code.
+                // Treat it as a trigger body itself.
+                ProcessTrigger(function, context, writeReplaceChain);
+            }
         }
 
-        private static void ProcessUnset(IRUnset unset, Dictionary<(string Name, IRScope), SSADefinition> variables, HashSet<(string, IRUnset)> recordTo, bool writeReplaceChain)
+        private static void ProcessUnset(IRUnset unset, Dictionary<ScopeSlot, SSADefinition> variables, HashSet<(string, IRUnset)> recordTo, bool writeReplaceChain)
         {
             IRScope startingScope = unset.Block.Scope;
             // On encountering an unset operation remove the affected definition from the stored variables.
@@ -319,7 +447,7 @@ namespace kOS.Safe.Compilation.IR
                 }
             }
         }
-        private static bool Unset(IRUnset unset, IRScope scope, Dictionary<(string VariableName, IRScope Scope), SSADefinition> variables, bool writeReplaceChain)
+        private static bool Unset(IRUnset unset, IRScope scope, Dictionary<ScopeSlot, SSADefinition> variables, bool writeReplaceChain)
         {
             bool closureVariableAffected = false;
             // Target is an instance of SSASetDefinition that is definitively Unset.
@@ -334,15 +462,15 @@ namespace kOS.Safe.Compilation.IR
                     if (potential)
                         target.Replaces.Add(null);
                 }
-                if (variables.TryGetValue((varName, scope), out SSADefinition slotValue) &&
+                if (variables.TryGetValue(new ScopeSlot(varName, scope), out SSADefinition slotValue) &&
                     slotValue.State != SSADefinition.SetState.Unset)
                 {
                     // If the higher scope slot was potentially unset, this one may remain valid
                     // Mark it as potentially unset as well.
                     if (potential)
-                        ReplaceDefinition(variables, (varName, scope), slotValue.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(varName, scope), slotValue.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
                     else
-                        ReplaceDefinition(variables, (varName, scope), target, writeReplaceChain);
+                        ReplaceDefinition(variables, new ScopeSlot(varName, scope), target, writeReplaceChain);
 
                     // If this slot was potentially unset, the next higher scope slot
                     // could be the target of this unset.
@@ -356,7 +484,7 @@ namespace kOS.Safe.Compilation.IR
             }
             return closureVariableAffected;
         }
-        private static bool PotentiallyUnsetByName(IRUnset unset, string varName, IRScope scope, Dictionary<(string VariableName, IRScope Scope), SSADefinition> variables, bool writeReplaceChain)
+        private static bool PotentiallyUnsetByName(IRUnset unset, string varName, IRScope scope, Dictionary<ScopeSlot, SSADefinition> variables, bool writeReplaceChain)
         {
             bool closureVariableAffected = false;
             if (string.IsNullOrEmpty(varName))
@@ -365,10 +493,10 @@ namespace kOS.Safe.Compilation.IR
             {
                 if (scope.IsGlobalScope)
                     closureVariableAffected = true;
-                if (variables.TryGetValue((varName, scope), out SSADefinition slotValue) &&
+                if (variables.TryGetValue(new ScopeSlot(varName, scope), out SSADefinition slotValue) &&
                     slotValue.State != SSADefinition.SetState.Unset)
                 {
-                    ReplaceDefinition(variables, (varName, scope), slotValue.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
+                    ReplaceDefinition(variables, new ScopeSlot(varName, scope), slotValue.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
                     // Break when there is a slot that is definitively Set.
                     if (slotValue.State == SSADefinition.SetState.Set)
                         break;
@@ -378,18 +506,18 @@ namespace kOS.Safe.Compilation.IR
             return closureVariableAffected;
         }
 
-        private static void ProcessTrigger(IClosureVariableUser trigger, Dictionary<(string, IRScope), SSADefinition> variables, HashSet<(string, IRScope)> readBlacklist, Dictionary<(string, IRScope), IRUnset> writeBlacklist, bool writeReplaceChain)
+        private static void ProcessTrigger(IClosureVariableUser trigger, SSAContext context, bool writeReplaceChain)
         {
             foreach ((string varName, IRUnset unset) in trigger.ExternalUnsets)
             {
                 IRScope scope = trigger.ClosureScope;
                 while (scope != null)
                 {
-                    writeBlacklist[(varName, scope)] = unset;
-                    if (variables.TryGetValue((varName, scope), out SSADefinition ssaDef) &&
+                    context.WriteBlacklist[new ScopeSlot(varName, scope)] = unset;
+                    if (context.Variables.TryGetValue(new ScopeSlot(varName, scope), out SSADefinition ssaDef) &&
                         ssaDef.State != SSADefinition.SetState.Unset)
                     {
-                        ReplaceDefinition(variables, (varName, scope), ssaDef.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
+                        ReplaceDefinition(context.Variables, new ScopeSlot(varName, scope), ssaDef.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
                     }
                     scope = scope.ParentScope;
                 }
@@ -399,20 +527,26 @@ namespace kOS.Safe.Compilation.IR
                 IRScope scope = trigger.ClosureScope;
                 while (scope != null)
                 {
-                    readBlacklist.Add((varName, scope));
+                    context.ReadBlacklist.Add(new ScopeSlot(varName, scope));
                     scope = scope.ParentScope;
                 }
             }
         }
 
-        private static void ProcessCall(IRCall call, IRCodePart codePart, Dictionary<(string, IRScope), SSADefinition> variables, HashSet<(string, IRScope)> readBlacklist, Dictionary<(string, IRScope), IRUnset> writeBlacklist, IClosureVariableUser callingClosure, bool writeReplaceChain)
+        private static void ProcessCall(IRInstruction call, IInterimFunction function, IRCodePart codePart, SSAContext context, IClosureVariableUser callingClosure, bool writeReplaceChain)
         {
-            IRFunction function = codePart.GetFunction(call);
+            if (call is IRCall directCall &&
+                (directCall.Direct ||
+                (directCall.TargetMethod is IRSuffixGet suffixGet &&
+                !suffixGet.Suffix.Equals("call", StringComparison.OrdinalIgnoreCase))) &&
+                function == null)
+                return;
+
             if (function != null)
             {
-                HandleFunction(call, function, variables, readBlacklist, writeBlacklist, callingClosure, writeReplaceChain);
+                HandleFunction(call, function, context, callingClosure, writeReplaceChain);
             }
-            else if (!call.Direct && !(call.IndirectMethod is IRSuffixGetMethod))
+            else
             {
                 // Function calls to a UserDelegate could be to any function
                 // Global variables don't get SSA'd, so we don't care about
@@ -420,12 +554,12 @@ namespace kOS.Safe.Compilation.IR
                 // Clobber/potentially overwrite anything affected by any
                 // function in this code part.
                 foreach (IRFunction func in codePart.Functions)
-                {
-                    HandleFunction(call, func, variables, readBlacklist, writeBlacklist, callingClosure, writeReplaceChain);
-                }
+                    HandleFunction(call, func, context, callingClosure, writeReplaceChain);
+                foreach (IRAnonymousFunction anonFunc in codePart.Elements.SelectMany(e => e.AnonymousFunctions))
+                    HandleFunction(call, anonFunc, context, callingClosure, writeReplaceChain);
             }
         }
-        static void HandleFunction(IRCall call, IRFunction function, Dictionary<(string, IRScope), SSADefinition> variables, HashSet<(string, IRScope)> readBlacklist, Dictionary<(string, IRScope), IRUnset> writeBlacklist, IClosureVariableUser callingClosure, bool writeReplaceChain)
+        static void HandleFunction(IRInstruction callSite, IInterimFunction function, SSAContext context, IClosureVariableUser callingClosure, bool writeReplaceChain)
         {
             HashSet<string> externalWrites = callingClosure?.ExternalWrites;
             HashSet<(string, IRUnset)> externalUnsets = callingClosure?.ExternalUnsets;
@@ -444,10 +578,10 @@ namespace kOS.Safe.Compilation.IR
                     if (scope.IsGlobalScope)
                         externalUnsets?.Add((varName, unset));
 
-                    if (variables.TryGetValue((varName, scope), out SSADefinition ssaDef) &&
+                    if (context.Variables.TryGetValue(new ScopeSlot(varName, scope), out SSADefinition ssaDef) &&
                         ssaDef.State != SSADefinition.SetState.Unset)
                     {
-                        ReplaceDefinition(variables, (varName, scope), ssaDef.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
+                        ReplaceDefinition(context.Variables, new ScopeSlot(varName, scope), ssaDef.PotentiallyUnset(unset, writeReplaceChain), writeReplaceChain);
 
                         // A recursive function could unset the same variable multiple times.
                         // So this goes all the way to the top.
@@ -466,13 +600,13 @@ namespace kOS.Safe.Compilation.IR
                     if (scope.IsGlobalScope)
                         externalWrites?.Add(varName);
 
-                    if (variables.TryGetValue((varName, scope), out SSADefinition ssaDef) &&
+                    if (context.Variables.TryGetValue(new ScopeSlot(varName, scope), out SSADefinition ssaDef) &&
                         ssaDef.State != SSADefinition.SetState.Unset)
                     {
-                        if (function.TerminalBlock.IncomingVariableDefinitions.TryGetValue((varName, function.ClosureScope.ParentScope), out SSADefinition writeDefinition))
-                            ReplaceDefinition(variables, (varName, scope), writeDefinition, writeReplaceChain);
+                        if (function.TerminalBlock.IncomingVariableDefinitions.TryGetValue(new ScopeSlot(varName, function.ClosureScope.ParentScope), out SSADefinition writeDefinition))
+                            ReplaceDefinition(context.Variables, new ScopeSlot(varName, scope), writeDefinition, writeReplaceChain);
                         else
-                            ReplaceDefinition(variables, (varName, scope), ssaDef.PotentiallyOverwrite(SSASetDefinition.FromCallSite(varName, call), writeReplaceChain), writeReplaceChain);
+                            ReplaceDefinition(context.Variables, new ScopeSlot(varName, scope), ssaDef.PotentiallyOverwrite(SSASetDefinition.FromCallSite(varName, callSite), writeReplaceChain), writeReplaceChain);
 
                         if (ssaDef.State == SSADefinition.SetState.Set)
                             break;
@@ -484,7 +618,7 @@ namespace kOS.Safe.Compilation.IR
             // This is handled as normal for a trigger.
             foreach (IRTrigger trigger in function.TriggersCreated)
             {
-                ProcessTrigger(trigger, variables, readBlacklist, writeBlacklist, writeReplaceChain);
+                ProcessTrigger(trigger, context, writeReplaceChain);
             }
         }
 
@@ -499,12 +633,12 @@ namespace kOS.Safe.Compilation.IR
         }
 
         private static readonly Dictionary<(BasicBlock, string), SSASetDefinition> externalDefinitionsCache = new Dictionary<(BasicBlock, string), SSASetDefinition>();
-        public static void BuildPhis(BasicBlock root, bool stackAdoptsTypeHints, Dictionary<(string, IRScope), SSADefinition> incomingVariables = null)
+        public static void BuildPhis(BasicBlock root, bool stackAdoptsTypeHints, Dictionary<ScopeSlot, SSADefinition> incomingVariables = null)
             => BuildPhis(root, root.CodePart, null, stackAdoptsTypeHints, incomingVariables);
-        private static void BuildPhis(BasicBlock root, IRCodePart codePart, IClosureVariableUser funcOrTrigger, bool stackAdoptsTypeHints, Dictionary<(string, IRScope), SSADefinition> incomingVariables = null)
+        private static void BuildPhis(BasicBlock root, IRCodePart codePart, IClosureVariableUser funcOrTrigger, bool stackAdoptsTypeHints, Dictionary<ScopeSlot, SSADefinition> incomingVariables = null)
         {
-            Dictionary<BasicBlock, Dictionary<(string Name, IRScope Scope), SSADefinition>> variablesOut =
-                new Dictionary<BasicBlock, Dictionary<(string, IRScope), SSADefinition>>();
+            Dictionary<BasicBlock, Dictionary<ScopeSlot, SSADefinition>> variablesOut =
+                new Dictionary<BasicBlock, Dictionary<ScopeSlot, SSADefinition>>();
             Dictionary<BasicBlock, List<IStackTransferObject>> stackOut =
                 new Dictionary<BasicBlock, List<IStackTransferObject>>();
 
@@ -514,8 +648,8 @@ namespace kOS.Safe.Compilation.IR
             {
                 BasicBlock block = worklist.Dequeue();
 
-                HashSet<(string, IRScope)> blacklist = block.TriggerPropagationBlacklist;
-                Dictionary<(string, IRScope), IRUnset> writeBlacklist = block.TriggerUnsetBlacklist;
+                HashSet<ScopeSlot> blacklist = block.TriggerPropagationBlacklist;
+                Dictionary<ScopeSlot, IRUnset> writeBlacklist = block.TriggerUnsetBlacklist;
                 List<(BasicBlock Block, IRScope Scope, SSADefinition Variable)> varsIn = new List<(BasicBlock, IRScope, SSADefinition)>();
 
                 // Make the blacklist the union of all incoming blacklists
@@ -524,7 +658,7 @@ namespace kOS.Safe.Compilation.IR
                 BasicBlock stackDepthSetBy = null;
                 if (block.Predecessors.Count == 0 && incomingVariables != null)
                 {
-                    foreach (KeyValuePair<(string Name, IRScope Scope), SSADefinition> variable in incomingVariables)
+                    foreach (KeyValuePair<ScopeSlot, SSADefinition> variable in incomingVariables)
                         varsIn.Add((null, variable.Key.Scope, variable.Value));
                 }
                 else
@@ -533,11 +667,11 @@ namespace kOS.Safe.Compilation.IR
                     {
                         // Manage blacklist and incoming variables
                         blacklist.UnionWith(predecessor.TriggerPropagationBlacklist);
-                        foreach (KeyValuePair<(string, IRScope), IRUnset> item in writeBlacklist)
+                        foreach (KeyValuePair<ScopeSlot, IRUnset> item in writeBlacklist)
                             writeBlacklist[item.Key] = item.Value;
-                        if (variablesOut.TryGetValue(predecessor, out Dictionary<(string Name, IRScope Scope), SSADefinition> predVarsOut))
+                        if (variablesOut.TryGetValue(predecessor, out Dictionary<ScopeSlot, SSADefinition> predVarsOut))
                         {
-                            foreach (KeyValuePair<(string Name, IRScope Scope), SSADefinition> variable in predVarsOut
+                            foreach (KeyValuePair<ScopeSlot, SSADefinition> variable in predVarsOut
                                 .Where(v => block.Scope.IsEqualOrEncompassedBy(v.Key.Scope)))
                                 varsIn.Add((predecessor, variable.Key.Scope, variable.Value));
                         }
@@ -577,8 +711,7 @@ namespace kOS.Safe.Compilation.IR
                 block.IncomingVariableDefinitions = GeneratePhis(block, varsIn);
 
                 // Analyze the block with that set of incoming variable definitions
-                Dictionary<(string Name, IRScope Scope), SSADefinition> varsOut =
-                    AnalyzeBlock(block, codePart, funcOrTrigger);
+                Dictionary<ScopeSlot, SSADefinition> varsOut = AnalyzeBlock(block, codePart, funcOrTrigger);
 
                 // If this block was previously analyzed, and
                 // if the definitions all match, there's no need to queue
@@ -586,7 +719,7 @@ namespace kOS.Safe.Compilation.IR
                 bool same = true;
                 if (variablesOut.ContainsKey(block))
                 {
-                    Dictionary<(string, IRScope), SSADefinition> oldDefinition = variablesOut[block];
+                    Dictionary<ScopeSlot, SSADefinition> oldDefinition = variablesOut[block];
                     same &= oldDefinition.ContentsEqual(varsOut, SSADefinition.ReferenceEqualityComparer);
                 }
                 else
@@ -761,7 +894,7 @@ namespace kOS.Safe.Compilation.IR
                                         stackValue = stack[0];
                                         stack.RemoveAt(0);
                                         IRParameter indirectParameter = new IRParameter(block.IncomingStackState.IndexOf(stackValue), block) { StackTransferObject = stackValue };
-                                        call.IndirectMethod = indirectParameter;
+                                        call.TargetMethod = indirectParameter;
                                     }
                                     break;
                                 }
@@ -781,18 +914,18 @@ namespace kOS.Safe.Compilation.IR
             }
             return stack;
         }
-        private static Dictionary<(string Name, IRScope Scope), SSADefinition> GeneratePhis(BasicBlock block, List<(BasicBlock Block, IRScope Scope, SSADefinition Variable)> varsIn)
+        private static Dictionary<ScopeSlot, SSADefinition> GeneratePhis(BasicBlock block, List<(BasicBlock Block, IRScope Scope, SSADefinition Variable)> varsIn)
         {
-            Dictionary<(string, IRScope), SSADefinition> result = new Dictionary<(string, IRScope), SSADefinition>();
-            foreach (IGrouping<(string Name, IRScope Scope), (BasicBlock Block, IRScope Scope, SSADefinition Variable)> definitionSet in
-                    varsIn.GroupBy(v => (v.Variable.Name, v.Scope)))
+            Dictionary<ScopeSlot, SSADefinition> result = new Dictionary<ScopeSlot, SSADefinition>();
+            foreach (IGrouping<ScopeSlot, (BasicBlock Block, IRScope Scope, SSADefinition Variable)> definitionSet in
+                    varsIn.GroupBy(v => new ScopeSlot(v.Variable.Name, v.Scope)))
             {
                 if (definitionSet.Select(def => (def.Scope, def.Variable)).Distinct(PhiComparer.Instance).Skip(1).Any())
                 {
                     // Phi required
                     if (!block.Phis.TryGetValue(definitionSet.Key, out PhiNodeSSA phiVar))
                     {
-                        phiVar = new PhiNodeSSA(definitionSet.Key.Name);
+                        phiVar = new PhiNodeSSA(definitionSet.Key.Name) { RequireExecutable = false };
                         block.Phis.Add(definitionSet.Key, phiVar);
                     }
 
@@ -902,49 +1035,59 @@ namespace kOS.Safe.Compilation.IR
             List<IRInstruction> instructions = block.Instructions;
 
             // Start with a clone of the block's incoming variable definitions.
-            Dictionary<(string Name, IRScope Scope), SSADefinition> liveDefinitions =
-                new Dictionary<(string, IRScope), SSADefinition>();
+            Dictionary<ScopeSlot, SSADefinition> liveDefinitions = new Dictionary<ScopeSlot, SSADefinition>();
 
             if (block.IncomingVariableDefinitions == null)
             {
-                block.IncomingVariableDefinitions = new Dictionary<(string Name, IRScope Scope), SSADefinition>();
+                block.IncomingVariableDefinitions = new Dictionary<ScopeSlot, SSADefinition>();
                 block.Scope = block.CodeComponent.RootBlock.Scope.GetGlobalScope();
                 return;
             }
 
-            foreach (KeyValuePair<(string Name, IRScope Scope), SSADefinition> definition in block.IncomingVariableDefinitions)
+            foreach (KeyValuePair<ScopeSlot, SSADefinition> definition in block.IncomingVariableDefinitions)
                 liveDefinitions[definition.Key] = definition.Value;
 
             // Start with the union of all incoming trigger blacklists.
-            HashSet<(string, IRScope)> triggerBlacklist = new HashSet<(string, IRScope)>();
-            Dictionary<(string, IRScope), IRUnset> triggerWriteBlacklist = new Dictionary<(string, IRScope), IRUnset>();
+            HashSet<ScopeSlot> triggerBlacklist = new HashSet<ScopeSlot>();
+            Dictionary<ScopeSlot, IRUnset> triggerWriteBlacklist = new Dictionary<ScopeSlot, IRUnset>();
             foreach (BasicBlock predecessor in block.Predecessors)
             {
                 triggerBlacklist.UnionWith(predecessor.TriggerPropagationBlacklist);
-                foreach (KeyValuePair<(string, IRScope), IRUnset> item in predecessor.TriggerUnsetBlacklist)
+                foreach (KeyValuePair<ScopeSlot, IRUnset> item in predecessor.TriggerUnsetBlacklist)
                     triggerWriteBlacklist[item.Key] = item.Value;
             }
 
             // Create a local function for SSA replacement for this specific block.
+            SSAContext context = new SSAContext(liveDefinitions, triggerBlacklist, triggerWriteBlacklist);
             IInterimOperand ScopedSSAReplacement(IInterimOperand op)
-                => SSAReplacement(op, block.Scope, liveDefinitions, triggerBlacklist, funcOrTrigger);
+                => SSAReplacement(op, block.Scope, context, funcOrTrigger);
 
             foreach (IRInstruction instruction in block.Instructions)
             {
                 codePart.ReachableVariables[instruction] = DetermineReaches(
                     instruction, liveDefinitions.Keys.Select(def => def.Name).Distinct(StringComparer.OrdinalIgnoreCase),
-                    liveDefinitions, triggerBlacklist);
+                    context);
                 // Process call sites and replace variable definitions.
                 foreach (IOperandInstructionBase operandInstruction in instruction.DepthFirst())
                 {
                     if (operandInstruction is IRCall call)
                     {
-                        IRFunction function = codePart.GetFunction(call);
+                        if (call.TargetMethod is InterimUserFunction userFunc)
+                        {
+                            if (userFunc.Function != null)
+                                codePart.ReachableVariables[call] = DetermineCallReaches(call, userFunc.Function, funcOrTrigger, context);
+                            ProcessCall(call, userFunc.Function, codePart, context, null, true);
+                        }
+                    }
+                    else if (operandInstruction is IRSuffixGet suffixGet &&
+                        suffixGet.Suffix.Equals("call", StringComparison.OrdinalIgnoreCase))
+                    {
+                        IInterimFunction function = ResolveFunctionReference(suffixGet.Object, codePart, block.Scope, context);
                         if (function != null)
                         {
-                            codePart.ReachableVariables[call] = DetermineCallReaches(call, function, funcOrTrigger, liveDefinitions, triggerBlacklist);
+                            codePart.ReachableVariables[(IRInstruction)suffixGet.Object] = DetermineCallReaches((IRInstruction)suffixGet.Object, function, funcOrTrigger, context);
                         }
-                        ProcessCall(call, codePart, liveDefinitions, triggerBlacklist, triggerWriteBlacklist, null, true);
+                        ProcessCall(suffixGet, function, codePart, context, null, true);
                     }
                     operandInstruction.MutateEachOperand(ScopedSSAReplacement);
                 }
@@ -953,7 +1096,7 @@ namespace kOS.Safe.Compilation.IR
                 switch (instruction)
                 {
                     case IRAssign assignment:
-                        ProcessAssignment(assignment, null, liveDefinitions, triggerBlacklist, triggerWriteBlacklist, true);
+                        ProcessAssignment(assignment, codePart, context, true);
                         break;
                     case IRUnset unset:
                         ProcessUnset(unset, liveDefinitions, null, true);
@@ -963,7 +1106,7 @@ namespace kOS.Safe.Compilation.IR
                         {
                             string pointer = (string)((InterimConstantValue)irTrigger.Operand).Value;
                             IRTrigger trigger = codePart.GetTrigger(pointer);
-                            ProcessTrigger(trigger, liveDefinitions, triggerBlacklist, triggerWriteBlacklist, true);
+                            ProcessTrigger(trigger, context, true);
                         }
                         break;
                 }
@@ -975,14 +1118,13 @@ namespace kOS.Safe.Compilation.IR
             }
         }
 
-        private static IInterimOperand SSAReplacement(IInterimOperand operand, IRScope scope, Dictionary<(string, IRScope), SSADefinition> liveDefinitions, HashSet<(string, IRScope)> triggerBlacklist, IClosureVariableUser funcOrTrigger)
+        private static IInterimOperand SSAReplacement(IInterimOperand operand, IRScope scope, SSAContext context, IClosureVariableUser funcOrTrigger)
         {
             {
                 if (operand is InterimVariableReference variableRef)
                 {
                     IInterimVariableReference result = AttemptResolveReference(
-                        variableRef, scope,
-                        liveDefinitions, triggerBlacklist, out bool exceededClosure);
+                        variableRef, scope, context, out bool exceededClosure);
 
                     if (exceededClosure)
                         funcOrTrigger?.ExternalReads.Add(result.Name);
@@ -1002,7 +1144,7 @@ namespace kOS.Safe.Compilation.IR
 
                         while (!scope.IsGlobalScope)
                         {
-                            if (liveDefinitions.TryGetValue((name, scope), out SSADefinition value) &&
+                            if (context.Variables.TryGetValue(new ScopeSlot(name, scope), out SSADefinition value) &&
                                 value.State == SSADefinition.SetState.Set)
                                 return new InterimConstantValue(Encapsulation.BooleanValue.True, existOp);
                             scope = scope.ParentScope;
@@ -1014,7 +1156,7 @@ namespace kOS.Safe.Compilation.IR
             }
         }
 
-        private static IInterimVariableReference AttemptResolveReference(IInterimVariableReference variableRef, IRScope startingScope, Dictionary<(string, IRScope), SSADefinition> liveDefinitions, HashSet<(string, IRScope)> triggerBlacklist, out bool exceededClosure)
+        private static IInterimVariableReference AttemptResolveReference(IInterimVariableReference variableRef, IRScope startingScope, SSAContext context, out bool exceededClosure)
         {
             exceededClosure = false;
             string name = variableRef.Name;
@@ -1025,10 +1167,10 @@ namespace kOS.Safe.Compilation.IR
             // guaranteed for global variables.
             while (!scope.IsGlobalScope)
             {
-                if (liveDefinitions.TryGetValue((name, scope), out SSADefinition value) &&
+                if (context.Variables.TryGetValue(new ScopeSlot(name, scope), out SSADefinition value) &&
                     value.State != SSADefinition.SetState.Unset)
                 {
-                    if (triggerBlacklist.Contains((name, scope)))
+                    if (context.ReadBlacklist.Contains(new ScopeSlot(name, scope)))
                     {
                         blacklisted = true;
                         unresolvedReference = null;
@@ -1055,7 +1197,7 @@ namespace kOS.Safe.Compilation.IR
             return variableRef;
         }
 
-        private static HashSet<IInterimVariableReference> DetermineCallReaches(IRCall call, IRFunction function, IClosureVariableUser funcOrTrigger, Dictionary<(string, IRScope), SSADefinition> liveDefinitions, HashSet<(string, IRScope)> triggerBlacklist)
+        private static HashSet<IInterimVariableReference> DetermineCallReaches(IRInstruction call, IInterimFunction function, IClosureVariableUser funcOrTrigger, SSAContext context)
         {
             HashSet<IInterimVariableReference> reachableVariables = new HashSet<IInterimVariableReference>();
 
@@ -1065,7 +1207,7 @@ namespace kOS.Safe.Compilation.IR
             {
                 IInterimVariableReference result = AttemptResolveReference(
                     new InterimVariableReference(name, call), function.ClosureScope,
-                    liveDefinitions, triggerBlacklist, out bool exceededClosure);
+                    context, out bool exceededClosure);
                 if (exceededClosure && funcOrTrigger != null)
                 {
                     if (function.ExternalReads.Contains(name))
@@ -1083,7 +1225,7 @@ namespace kOS.Safe.Compilation.IR
             }
             return reachableVariables;
         }
-        private static HashSet<IInterimVariableReference> DetermineReaches(IRInstruction instruction, IEnumerable<string> variablesToTest, Dictionary<(string, IRScope), SSADefinition> liveDefinitions, HashSet<(string, IRScope)> triggerBlacklist)
+        private static HashSet<IInterimVariableReference> DetermineReaches(IRInstruction instruction, IEnumerable<string> variablesToTest, SSAContext context)
         {
             HashSet<IInterimVariableReference> reachableVariables = new HashSet<IInterimVariableReference>();
 
@@ -1091,7 +1233,7 @@ namespace kOS.Safe.Compilation.IR
             {
                 IInterimVariableReference result = AttemptResolveReference(
                     new InterimVariableReference(name, instruction), instruction.Block.Scope,
-                    liveDefinitions, triggerBlacklist, out _);
+                    context, out _);
                 if (!(result is InterimVariableReference))
                     reachableVariables.Add(result);
             }
@@ -1107,8 +1249,44 @@ namespace kOS.Safe.Compilation.IR
             // Must not remove assignments whose lifespan is not invariant.
             if (definition.ReplacedBy.Any(ssaDef => ssaDef.State == SSADefinition.SetState.PotentiallyUnset))
                 return true;
+
+            if (GetDownstreamAssignments(definition).Any(ssaDef => ssaDef.DefinedAt == null))
+                return true;
+
             // If none of the above apply, it is safe to delete this definition.
             return false;
+        }
+
+        private static HashSet<SSASetDefinition> GetDownstreamAssignments(SSADefinition definition)
+        {
+            Queue<SSADefinition> definitionQueue = new Queue<SSADefinition>(definition.ReplacedBy);
+            HashSet<SSASetDefinition> downstreamAssignments = new HashSet<SSASetDefinition>(SSADefinition.ReferenceEqualityComparer);
+            HashSet<SSADefinition> visited = new HashSet<SSADefinition>(SSADefinition.ReferenceEqualityComparer);
+            while (definitionQueue.Count > 0)
+            {
+                SSADefinition replacedBy = definitionQueue.Dequeue();
+                if (!visited.Add(replacedBy))
+                    continue;
+                switch (replacedBy)
+                {
+                    case SSASetDefinition setDef:
+                        downstreamAssignments.Add(setDef);
+                        break;
+                    case SSAPotentialDefinition potentialDef:
+                        if (potentialDef.Preceding != definition)
+                            throw new InvalidOperationException();
+                        definitionQueue.Enqueue(potentialDef.Succeeding);
+                        break;
+                    case PhiVariable ssaDef:
+                        foreach (SSADefinition potentialValue in ssaDef.Node.PossibleValues.Values)
+                            if (potentialValue != definition)
+                                definitionQueue.Enqueue(potentialValue);
+                        break;
+                    default:
+                        throw new NotImplementedException();
+                }
+            }
+            return downstreamAssignments;
         }
 
         public static bool RemoveAssignment(IRAssign assignment, bool overrideProtectionCheck = false, bool overrideParameterProtection = false)
@@ -1123,7 +1301,7 @@ namespace kOS.Safe.Compilation.IR
             // I.e. the function is a local function and all call sites have that parameter removed.
             if (IRParameter.IsOrContainsParameter(assignment.Value))
             {
-                IRFunction.IRFunctionFragment fragment = assignment.Block.CodeComponent as IRFunction.IRFunctionFragment;
+                IRFunctionFragment fragment = assignment.Block.CodeComponent as IRFunctionFragment;
                 if ((fragment != null &&
                     !fragment.Function.IsGlobal) ||
                     overrideParameterProtection)
@@ -1187,12 +1365,9 @@ namespace kOS.Safe.Compilation.IR
             }
 
             // Convert subsequent assignments to be declarative
-            foreach (IRAssign nextAssign in definition.ReplacedBy.
-                Where(ssaDef => ssaDef.State == SSADefinition.SetState.Set).
-                Select(ssaDef => ssaDef.GetSetDefinition()?.DefinedAt))
+            HashSet<SSASetDefinition> assignmentsToUpdate = GetDownstreamAssignments(definition);
+            foreach (IRAssign nextAssign in assignmentsToUpdate.Select(ssaDef => ssaDef.DefinedAt))
             {
-                if (nextAssign == null)
-                    continue;
                 nextAssign.Scope = IRAssign.StoreScope.Local;
                 nextAssign.AssertExists = false;
             }
@@ -1214,10 +1389,10 @@ namespace kOS.Safe.Compilation.IR
             // Remove the definition from IncomingVariables
             foreach (BasicBlock b in assignment.Block.CodeComponent.Blocks)
             {
-                HashSet<(string, IRScope)> itemsToRemove = new HashSet<(string, IRScope)>(
+                HashSet<ScopeSlot> itemsToRemove = new HashSet<ScopeSlot>(
                     b.IncomingVariableDefinitions.Where(kvp => kvp.Value == assignment.Target).Select(kvp => kvp.Key)
                     );
-                foreach ((string, IRScope) key in itemsToRemove)
+                foreach (ScopeSlot key in itemsToRemove)
                 {
                     b.IncomingVariableDefinitions.Remove(key);
                     if (definition.Replaces.Count == 1)
@@ -1235,7 +1410,7 @@ namespace kOS.Safe.Compilation.IR
             return true;
         }
 
-        private static int GetParameterIndex(ICodeComponent codeComponent, IRParameter parameter)
+        private static int GetParameterIndex(CodeComponent codeComponent, IRParameter parameter)
         {
             int index = 0;
             foreach (BasicBlock block in BasicBlock.GetReversePostOrder(codeComponent.RootBlock, BasicBlock.GetSuccessors))
@@ -1259,6 +1434,34 @@ namespace kOS.Safe.Compilation.IR
                     break;
             }
             return index;
+        }
+
+        public readonly struct ScopeSlot
+        {
+            public string Name { get; }
+            public IRScope Scope { get; }
+            public ScopeSlot(string variableName, IRScope scope)
+            {
+                Name = variableName;
+                Scope = scope;
+            }
+            public static implicit operator (string VariableName, IRScope Scope)(ScopeSlot scopeSlot)
+                => (scopeSlot.Name, scopeSlot.Scope);
+            public static explicit operator ScopeSlot((string VariableName, IRScope Scope) value)
+                => new ScopeSlot(value.VariableName, value.Scope);
+        }
+
+        private readonly struct SSAContext
+        {
+            public Dictionary<ScopeSlot, SSADefinition> Variables { get; }
+            public HashSet<ScopeSlot> ReadBlacklist { get; }
+            public Dictionary<ScopeSlot, IRUnset> WriteBlacklist { get; }
+            public SSAContext(Dictionary<ScopeSlot, SSADefinition> variables, HashSet<ScopeSlot> readBlacklist, Dictionary<ScopeSlot, IRUnset> writeBlacklist)
+            {
+                Variables = variables;
+                ReadBlacklist = readBlacklist;
+                WriteBlacklist = writeBlacklist;
+            }
         }
     }
 }

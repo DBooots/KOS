@@ -54,15 +54,19 @@ namespace kOS.Safe.Compilation.IR
 
     public class IRRelocateLater : InterimConstantValue
     {
-        public IRRelocateLater(string value, OpcodePushRelocateLater opcode) : base(value, opcode)
+        public IRCodePart CodePart { get; }
+        public IRRelocateLater(string value, OpcodePushRelocateLater opcode, IRCodePart codePart) : base(value, opcode)
         {
-            // Not technically correct, but this removes it from any optimization.
-            Type = null;
+            Type = typeof(Encapsulation.UserDelegate);
+            CodePart = codePart;
         }
 
         public override IEnumerable<Opcode> EmitOpcodes()
         {
-            yield return new OpcodePushRelocateLater((string)Value)
+            string pointer = (string)Value;
+            if (pointer.StartsWith("@"))
+                pointer = CodePart.GetTrigger(pointer)?.Label;
+            yield return new OpcodePushRelocateLater(pointer)
             {
                 SourceLine = SourceLine,
                 SourceColumn = SourceColumn
@@ -73,13 +77,19 @@ namespace kOS.Safe.Compilation.IR
     public class IRDelegateRelocateLater : IRRelocateLater
     {
         public bool WithClosure { get; }
-        public IRDelegateRelocateLater(string value, bool withClosure, OpcodePushDelegateRelocateLater opcode) : base(value, opcode)
+        public IRDelegateRelocateLater(string value, bool withClosure, OpcodePushDelegateRelocateLater opcode, IRCodePart codePart) : base(value, opcode, codePart)
         {
             WithClosure = withClosure;
         }
         public override IEnumerable<Opcode> EmitOpcodes()
         {
-            yield return new OpcodePushDelegateRelocateLater((string)Value, WithClosure)
+            string pointer = (string)Value;
+            if (pointer.StartsWith("@"))
+            {
+                IRAnonymousFunction function = (IRAnonymousFunction)CodePart.GetFunction(pointer);
+                pointer = function.RootBlock.Label;
+            }
+            yield return new OpcodePushDelegateRelocateLater(pointer, WithClosure)
             {
                 SourceLine = SourceLine,
                 SourceColumn = SourceColumn
@@ -184,6 +194,8 @@ namespace kOS.Safe.Compilation.IR
         }
         public static bool IsSetResolvable(IRParameter parameter)
         {
+            if (parameter.StackTransferObject == null)
+                return false;
             HashSet<IStackTransferObject> pushes = new HashSet<IStackTransferObject>();
             HashSet<IRParameter> parameters = new HashSet<IRParameter>();
             AddToSet(parameter, pushes, parameters);

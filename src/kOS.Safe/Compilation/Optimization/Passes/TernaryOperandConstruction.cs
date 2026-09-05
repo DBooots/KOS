@@ -5,14 +5,14 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class TernaryOperandConstruction : IOptimizationPass<ICodeComponent>
+    public class TernaryOperandConstruction : IOptimizationPass<CodeComponent>
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.None;
         public short SortIndex => -990;
 
-        public void ApplyPass(IEnumerable<ICodeComponent> code)
+        public void ApplyPass(IEnumerable<CodeComponent> code)
         {
-            foreach (ICodeComponent codeComponent in code)
+            foreach (CodeComponent codeComponent in code)
             {
                 HashSet<BasicBlock> visited = new HashSet<BasicBlock>();
                 HashSet<IStackTransferObject> eliminatedStackItems = new HashSet<IStackTransferObject>();

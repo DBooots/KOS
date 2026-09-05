@@ -14,14 +14,13 @@ namespace kOS.Safe.Compilation.IR
             BasicBlock betweenBlock = new BasicBlock(precursor.CodeComponent, precursor.EndIndex, successor.StartIndex)
             {
                 Scope = useHeaderScope ? precursor.Scope : successor.Scope,
-                ExtendedBlock = successor.ExtendedBlock,
                 IsExecutable = successor.IsExecutable
             };
             betweenBlock.TriggerPropagationBlacklist.UnionWith(successor.TriggerPropagationBlacklist);
-            foreach (var key in successor.TriggerUnsetBlacklist.Keys)
+            foreach (SingleStaticAssignment.ScopeSlot key in successor.TriggerUnsetBlacklist.Keys)
                 betweenBlock.TriggerUnsetBlacklist[key] = successor.TriggerUnsetBlacklist[key];
-            betweenBlock.IncomingVariableDefinitions = new Dictionary<(string, IRScope), SSADefinition>();
-            foreach (var key in successor.IncomingVariableDefinitions.Keys)
+            betweenBlock.IncomingVariableDefinitions = new Dictionary<SingleStaticAssignment.ScopeSlot, SSADefinition>();
+            foreach (SingleStaticAssignment.ScopeSlot key in successor.IncomingVariableDefinitions.Keys)
                 betweenBlock.IncomingVariableDefinitions[key] = successor.IncomingVariableDefinitions[key];
 
             betweenBlock.Dominator = precursor;
@@ -62,7 +61,6 @@ namespace kOS.Safe.Compilation.IR
             BasicBlock successorBlock = new BasicBlock(CodeComponent, StartIndex, EndIndex)
             {
                 Scope = Scope,
-                ExtendedBlock = ExtendedBlock,
                 IsExecutable = IsExecutable
             };
 
@@ -73,10 +71,10 @@ namespace kOS.Safe.Compilation.IR
             }
 
             successorBlock.TriggerPropagationBlacklist.UnionWith(TriggerPropagationBlacklist);
-            foreach (var key in TriggerUnsetBlacklist.Keys)
+            foreach (SingleStaticAssignment.ScopeSlot key in TriggerUnsetBlacklist.Keys)
                 successorBlock.TriggerUnsetBlacklist[key] = TriggerUnsetBlacklist[key];
-            successorBlock.IncomingVariableDefinitions = new Dictionary<(string, IRScope), SSADefinition>();
-            foreach (var key in IncomingVariableDefinitions.Keys)
+            successorBlock.IncomingVariableDefinitions = new Dictionary<SingleStaticAssignment.ScopeSlot, SSADefinition>();
+            foreach (SingleStaticAssignment.ScopeSlot key in IncomingVariableDefinitions.Keys)
                 successorBlock.IncomingVariableDefinitions[key] = IncomingVariableDefinitions[key];
 
             successorBlock.Continuation = Continuation;
@@ -134,7 +132,7 @@ namespace kOS.Safe.Compilation.IR
 
             before.CodeComponent.Blocks.AddRange(pattern.Where(b => !before.CodeComponent.Blocks.Contains(b)));
         }
-        public static IEnumerable<BasicBlock> ClonePattern(IEnumerable<BasicBlock> pattern, bool stackAdoptsTypeHints = false, Dictionary<(string, IRScope), SSADefinition> incomingVariables = null)
+        public static IEnumerable<BasicBlock> ClonePattern(IEnumerable<BasicBlock> pattern, bool stackAdoptsTypeHints = false, Dictionary<SingleStaticAssignment.ScopeSlot, SSADefinition> incomingVariables = null)
         {
             if (pattern == null || !pattern.Any())
                 return Enumerable.Empty<BasicBlock>();
@@ -235,7 +233,7 @@ namespace kOS.Safe.Compilation.IR
 
             block.IsExecutable = original.IsExecutable;
 
-            foreach ((string, IRScope) key in original.Phis.Keys)
+            foreach (SingleStaticAssignment.ScopeSlot key in original.Phis.Keys)
                 block.Phis[key] = original.Phis[key];
 
             foreach (IRInstruction instruction in original.Instructions)

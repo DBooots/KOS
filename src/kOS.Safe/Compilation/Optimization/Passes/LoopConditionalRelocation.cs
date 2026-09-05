@@ -5,15 +5,15 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class LoopConditionalRelocation : IOptimizationPass<ICodeComponent>
+    public class LoopConditionalRelocation : IOptimizationPass<CodeComponent>
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Balanced;
 
         public short SortIndex => -10000;
 
-        public void ApplyPass(IEnumerable<ICodeComponent> codeComponents)
+        public void ApplyPass(IEnumerable<CodeComponent> codeComponents)
         {
-            foreach (ICodeComponent component in codeComponents)
+            foreach (CodeComponent component in codeComponents)
                 ApplyPass(component.RootBlock);
         }
 

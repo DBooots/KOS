@@ -5,18 +5,18 @@ using kOS.Safe.Compilation.IR;
 
 namespace kOS.Safe.Compilation.Optimization.Passes
 {
-    public class LocalFunctionArgCheckElimination : IHolisticOptimizationPass
+    public class LocalFunctionArgCheckElimination : IOptimizationPass<IRFunction>
     {
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Balanced;
         public short SortIndex => -1500;
 
-        public void ApplyPass(IRCodePart codePart)
+        public void ApplyPass(IEnumerable<IRFunction> functions)
         {
-            foreach (IRCodePart.IRFunction function in codePart.Functions)
+            foreach (IRFunction function in functions)
                 ApplyPass(function);
         }
 
-        private static void ApplyPass(IRCodePart.IRFunction function)
+        private static void ApplyPass(IRFunction function)
         {
             if (function.Fragments.Count != 1)
                 return;

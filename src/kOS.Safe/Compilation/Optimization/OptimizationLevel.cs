@@ -9,6 +9,7 @@ namespace kOS.Safe.Compilation
      * -990. Ternary Operand Construction
      *  
      * O1:
+     * -12000. Conversion away from :CALL
      * -1000. SCCP with Type Propagation
      *  10. Suffix replacement:
      *          Replace CONSTANT: values with the constant
