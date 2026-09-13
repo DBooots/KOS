@@ -39,6 +39,8 @@ namespace kOS.Safe.Compilation.Optimization.Passes
         {
             switch (function)
             {
+                case null:
+                    return 0;
                 case IRFunction func:
                     int length = func.Fragments.Sum(fragment => BasicBlock.GetOpcodeCount(fragment.Blocks));
                     return length / func.Fragments.Count;
@@ -60,6 +62,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 List<IInterimOperand> necessaryStackState = new List<IInterimOperand>();
                 int callIndex = 0;
                 bool breaking = false;
+                IOperandInstructionBase baseInstruction = null;
                 for (; callIndex < instructions.Count; callIndex++)
                 {
                     foreach (IOperandInstructionBase operandInstruction in instructions[callIndex].DepthFirst())
@@ -79,9 +82,39 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                         if (operandInstruction == call)
                             breaking = true;
                     }
+
                     if (breaking)
+                    {
+                        baseInstruction = (IOperandInstructionBase)instructions[callIndex];
                         break;
+                    }
                     necessaryStackState.Clear();
+                }
+
+                if (!breaking &&
+                    callingBlock.Continuation is BranchContinuation branch)
+                {
+                    // Call site must be in the branch condition
+                    foreach (IOperandInstructionBase operandInstruction in branch.DepthFirst())
+                    {
+                        if (breaking)
+                        {
+                            bool innerBreaking = false;
+                            operandInstruction.ForEachOperand(op =>
+                            {
+                                if (op == call)
+                                    innerBreaking = true;
+                                if (!innerBreaking)
+                                    necessaryStackState.Add(op);
+                            });
+                            break;
+                        }
+                        if (operandInstruction == call)
+                            breaking = true;
+                    }
+
+                    if (breaking)
+                        baseInstruction = branch;
                 }
 
                 if (!breaking)
@@ -90,6 +123,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
 #else
                     continue;
 #endif
+
                 BasicBlock successor = callingBlock.Split(callIndex);
                 
                 IEnumerable<BasicBlock> inlinedFunction = BasicBlock.ClonePattern(function.Fragments.First().Blocks).ToList();
@@ -103,7 +137,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 }
 
                 IRParameter resultParameter = new IRParameter(0, successor);
-                foreach (IOperandInstructionBase operandInstruction in successor.Instructions[0].DepthFirst())
+                foreach (IOperandInstructionBase operandInstruction in baseInstruction.DepthFirst())
                 {
                     if (operandInstruction.AnyOperand(op => op == call))
                     {
@@ -125,6 +159,13 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     {
                         IRPushStack newPush = new IRPushStack(block, returnPush.Value);
                         block.Instructions[block.Instructions.Count - 1] = newPush;
+                        if (returnPush.Depth > 0)
+                            block.Instructions.Add(
+                                new IRNoStackInstruction(block, new OpcodePopScope(returnPush.Depth)
+                                {
+                                    SourceLine = returnPush.SourceLine,
+                                    SourceColumn = returnPush.SourceColumn
+                                }));
                         stackTransferPhi.PossibleValues[block] = newPush;
                     }
                 }
@@ -172,9 +213,9 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 {
                     foreach (BasicBlock block in inlinedFunction)
                         ConstantFolding.ApplyPass(block, Optimizer.AllowClobberBuiltins);
-                    if (successor.Instructions[0] is IRPop pop &&
+                    if (baseInstruction is IRPop pop &&
                         pop.IsInvariant)
-                        successor.Instructions.RemoveAt(0);
+                        successor.Instructions.Remove((IRInstruction)baseInstruction);
                 }
 
                 BasicBlock.Stitch(callingBlock, successor, inlinedFunction);
@@ -225,7 +266,6 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     else
                     {
                         branch.Condition = new InterimConstantValue(Encapsulation.BooleanValue.True, testArgBottom);
-                        branch.True.IncomingStackState.RemoveAt(0);
                         rootBlock.Continuation = new JumpContinuation(branch.True, branch.SourceLine, branch.SourceColumn);
 
                         foreach (StackTransferPhi stackPhi in branch.False.IncomingStackState.Where(s => s is StackTransferPhi).Cast<StackTransferPhi>())
@@ -280,6 +320,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     protectScope = true;
                     break;
                 }
+                scope = scope.ParentScope;
             }
 
             return true;

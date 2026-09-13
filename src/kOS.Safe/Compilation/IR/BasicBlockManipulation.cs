@@ -56,7 +56,7 @@ namespace kOS.Safe.Compilation.IR
         public BasicBlock Split(int newStartIndex)
         {
             if (newStartIndex < 0 ||
-                newStartIndex > Instructions.Count - 1)
+                newStartIndex > Instructions.Count)
                 throw new ArgumentException(nameof(newStartIndex));
             BasicBlock successorBlock = new BasicBlock(CodeComponent, StartIndex, EndIndex)
             {
