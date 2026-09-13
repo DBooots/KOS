@@ -3217,10 +3217,23 @@ namespace kOS.Safe.Compilation.KS
             AddOpcode(new OpcodePush(new KOSArgMarkerType())); // for the load() function.
             VisitNode(node.Nodes[1]);
             AddOpcode(new OpcodePush(false));
+            // COMPILE path [TO outputPath] [AT level]
             if (node.Nodes.Count > 3)
             {
-                // It has a "TO outputfile" clause:
-                VisitNode(node.Nodes[3]);
+                switch (node.Nodes[2].Token.Type)
+                {
+                    case TokenType.TO:
+                        // It has a "TO outputfile" clause:
+                        VisitNode(node.Nodes[3]);
+                        if (node.Nodes.Count > 5)
+                            VisitNode(node.Nodes[5]);
+                        break;
+                    case TokenType.AT:
+                        // The "TO outputfile" clause is missing
+                        AddOpcode(new OpcodePush("-default-compile-out-"));
+                        VisitNode(node.Nodes[3]);
+                        break;
+                }
             }
             else
             {

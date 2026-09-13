@@ -150,6 +150,9 @@ namespace kOS.Safe.Function
             bool defaultOutput = false;
             bool justCompiling = false; // is this load() happening to compile, or to run?
             GlobalPath outPath = null;
+            OptimizationLevel compilationOptLevel = (OptimizationLevel)Enum.Parse(
+                typeof(OptimizationLevel),
+                Utilities.SafeHouse.Config.OptimizationLevel);
             object topStack = PopValueAssert(shared, true); // null if there's no output file (output file means compile, not run).
             if (topStack != null)
             {
@@ -159,6 +162,29 @@ namespace kOS.Safe.Function
                     defaultOutput = true;
                 else
                     outPath = shared.VolumeMgr.GlobalPathFromObject(outputArg);
+
+                if (CountRemainingArgs(shared) > 0)
+                {
+                    topStack = PopValueAssert(shared, true);
+                    if (topStack != null)
+                    {
+                        switch (topStack)
+                        {
+                            case StringValue stringValue:
+                                if (!Enum.TryParse(stringValue, out compilationOptLevel))
+                                    throw new KOSException($"Invalid optimization level specified: {stringValue}.");
+                                break;
+                            case ScalarValue scalarValue:
+                                int intValue = scalarValue.GetIntValue();
+                                if (intValue < 0 || intValue > 4)
+                                    throw new KOSException($"Invalid optimization level specified: {intValue}.");
+                                compilationOptLevel = (OptimizationLevel)intValue;
+                                break;
+                            default:
+                                throw new KOSException($"Invalid optimization level specified: {topStack}.");
+                        }
+                    }
+                }
             }
 
             object skipAlreadyObject = PopValueAssert(shared, false);
@@ -217,7 +243,8 @@ namespace kOS.Safe.Function
                     LoadProgramsInSameAddressSpace = true,
                     FuncManager = shared.FunctionManager,
                     AllowClobberBuiltins = Utilities.SafeHouse.Config.AllowClobberBuiltIns,
-                    BindManager = shared.BindingMgr
+                    BindManager = shared.BindingMgr,
+                    OptimizationLevel = compilationOptLevel
                 };
                 // add this program to the address space of the parent program,
                 // or to a file to save:

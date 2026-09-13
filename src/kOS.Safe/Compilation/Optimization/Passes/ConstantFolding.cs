@@ -7,7 +7,6 @@ namespace kOS.Safe.Compilation.Optimization.Passes
 {
     public class ConstantFolding : IOptimizationPass<BasicBlock>, ILinkedOptimizationPass
     {
-        public const bool throwOnDivideByZero = false;
         public Optimizer Optimizer { get; set; }
         public OptimizationLevel OptimizationLevel => OptimizationLevel.Minimal;
         public short SortIndex => 30;
@@ -66,6 +65,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             // Skip calls if builtins may be clobbered because they may not be what is expected.
             if (!(allowClobberBuiltins && input is IRCall))
             {
+                bool throwOnDivideByZero = Utilities.SafeHouse.Config.ThrowOnDivideByZeroAtCompilation;
                 // Don't simplify a divide-by-zero when it is the only operation
                 // because that would break existing scripts.
                 // TODO: Add an "EXIT" (EOP) command to the language because reducing 1/0 will break the
@@ -263,7 +263,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 {
                     case OpcodeMathDivide _:
                         // X / 0 = Error
-                        if (throwOnDivideByZero &&
+                        if (Utilities.SafeHouse.Config.ThrowOnDivideByZeroAtCompilation &&
                             Encapsulation.ScalarIntValue.Zero.Equals(constantR.Value))
                             throw new KOSCompileException(instruction, new DivideByZeroException());
                         break;
