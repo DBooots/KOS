@@ -1147,11 +1147,22 @@ namespace kOS.Safe.Compilation.IR
                         userFunc_.Function == null)
                         throw new InvalidOperationException("Cannot use an indirect method on a direct call.");
                 }
-                if (value is InterimUserFunction userFunc &&
-                    userFunc.Function == null)
+
+                if (targetFunction is InterimUserFunction targetUserFunc)
+                    targetUserFunc.Function?.CallSites.Remove(this);
+                if (value is InterimUserFunction userFunc)
                 {
-                    Block.CodeComponent.UnresolvedCallSites.Add(this);
-                    Block.CodePart.UnresolvedCallSites.Add(this);
+                    if (userFunc.Function == null)
+                    {
+                        Block.CodeComponent.UnresolvedCallSites.Add(this);
+                        Block.CodePart.UnresolvedCallSites.Add(this);
+                    }
+                    else
+                    {
+                        userFunc.Function.CallSites.Add(this);
+                        Block.CodeComponent.UnresolvedCallSites.Remove(this);
+                        Block.CodePart.UnresolvedCallSites.Remove(this);
+                    }
                 }
                 else
                 {

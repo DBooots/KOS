@@ -280,7 +280,8 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     return false;
             }
             SingleStaticAssignment.ApplyUses(instruction.Block);
-            HashSet<IInterimVariableReference> reachableDefinitions = instruction.Block.CodePart.ReachableVariables[instruction];
+            if (!instruction.Block.CodePart.ReachableVariables.TryGetValue(instruction, out HashSet<IInterimVariableReference> reachableDefinitions))
+                return false;
 
             foreach (SSADefinition reference in references)
             {

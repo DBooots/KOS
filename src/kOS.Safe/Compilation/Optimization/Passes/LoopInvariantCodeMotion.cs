@@ -151,6 +151,8 @@ namespace kOS.Safe.Compilation.Optimization.Passes
             {
                 BasicBlock prefaceBlock = BasicBlock.InsertBlockBetween(loop.body.Dominator, loop.body);
                 prefaceBlock.Instructions.AddRange(relocatedInstructions);
+                foreach (IRInstruction instruction in relocatedInstructions.SelectMany(OptimizationTools.DepthFirstInstructions))
+                    instruction.Block = prefaceBlock;
             }
         }
 

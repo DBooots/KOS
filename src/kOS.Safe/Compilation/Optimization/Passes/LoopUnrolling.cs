@@ -409,7 +409,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                 while (first.Dominator != null)
                     first = first.Dominator;
 
-                ReplaceIncomingVariables(loopBody, loopData.body, indices, i);
+                ReplaceIncomingVariables(loopBody, first, indices, i);
                 if (!Optimizer.PassesToSkip.Contains(typeof(ConstantFolding)))
                 {
                     foreach (BasicBlock block in loopBody)

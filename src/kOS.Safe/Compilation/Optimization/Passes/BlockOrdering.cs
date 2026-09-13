@@ -439,15 +439,7 @@ namespace kOS.Safe.Compilation.Optimization.Passes
                     return c;
             }
 
-            // No intersection means that one or both blocks purely exit the region.
-            // If one block can reach the regionExit, we'll consider
-            // that to be the 'end' of the if block.
-            if (trueReach.Contains(regionExit))
-                return branch.True;
-            if (falseReach.Contains(regionExit))
-                return branch.False;
-
-            // Both branches solely exit the region.
+            // Both branches solely exit the region and never reconverge.
             return regionExit;
         }
         public static bool IsInsideRegion(BasicBlock candidate, BasicBlock regionEntry, BasicBlock regionExit)
